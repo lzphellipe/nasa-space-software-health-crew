@@ -322,6 +322,23 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class UserRefreshToken(Base):
+    __tablename__ = "user_refresh_tokens"
+    __table_args__ = (
+        Index("ix_user_refresh_tokens_user_id", "user_id"),
+        Index("ix_user_refresh_tokens_family_id", "family_id"),
+        Index("ix_user_refresh_tokens_expires_at", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    family_id: Mapped[str] = mapped_column(String(32))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AstronautPreference(Base):
     __tablename__ = "astronaut_preferences"
 

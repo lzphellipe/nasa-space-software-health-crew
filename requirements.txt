@@ -3,5 +3,7 @@ uvicorn[standard]>=0.30
 SQLAlchemy>=2.0
 httpx>=0.27
 pydantic>=2.7
+PyJWT>=2.8
+pypdf>=5.0
 # Only needed when DATABASE_URL points to PostgreSQL
 psycopg[binary]>=3.1

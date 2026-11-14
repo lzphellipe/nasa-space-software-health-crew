@@ -29,7 +29,7 @@ The download URL is resolved through the study file listing (`/osdr/data/osd/fil
 ```bash
 pip install -r requirements-dev.txt
 uvicorn app.main:app --reload            # http://localhost:8000/docs
-pytest                                   # 67 tests
+pytest
 ```
 
 On first start the database is empty, so the API ingests the three OSDR files and the two AGBRESA files (from NASA and PLOS, or the bundled copies if they are unreachable) and generates the synthetic mission. Data lands in `data/crew_health.db` (SQLite).
@@ -53,8 +53,10 @@ Astronauts and the care team log in and send the token as `Authorization: Bearer
 ```http
 POST /api/v1/auth/login
 { "username": "astronaut2", "password": "spaceapps2026" }
-→ { "accessToken": "...", "tokenType": "bearer", "expiresIn": 43200, "user": { "role": "astronaut", "astronautId": "A002", ... } }
+→ { "accessToken": "...", "tokenType": "bearer", "expiresIn": 1800, "refreshToken": "...", "refreshExpiresIn": 2592000, "user": { "role": "astronaut", "astronautId": "A002", ... } }
 ```
+
+Access tokens expire after 30 minutes. Use `POST /api/v1/auth/refresh` with `{ "refreshToken": "..." }` to rotate the refresh token and receive a new access token. Refresh sessions have a 30-day absolute lifetime; reusing a rotated token revokes that session family. `POST /api/v1/auth/logout` with the current refresh token revokes the session, but any access token already issued remains valid until its 30-minute expiry. Store refresh tokens securely and configure the same stable `JWT_SECRET` across app restarts and workers.
 
 | Role | Can see |
 |---|---|
@@ -72,7 +74,7 @@ Demo accounts (created at startup while `SEED_DEMO_USERS=true`, password `DEMO_P
 | `surgeon` | medical | all |
 | `admin` | admin | all |
 
-Passwords are stored as PBKDF2-SHA256 hashes; tokens are HS256 JWTs signed with `JWT_SECRET` (set it to a long random value; without it, a random one is used and tokens stop working after a restart). **Change the demo password or turn the demo accounts off outside a demo.**
+Passwords are stored as PBKDF2-SHA256 hashes; access tokens are HS256 JWTs signed with `JWT_SECRET` (set it to a long random value; without it, a random one is used and access tokens stop working after a restart). **Change the demo password or turn the demo accounts off outside a demo.**
 
 ### Mission clock
 

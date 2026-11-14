@@ -1,11 +1,14 @@
 """Authentication, check-ins, 7-day patterns, proactive messages, human support and PDF search."""
 
+import hashlib
 from collections import defaultdict
+from datetime import timedelta
 
 import pytest
+from sqlalchemy import select
 
 from app import db
-from app.models import ProactiveMessage
+from app.models import ProactiveMessage, UserRefreshToken, utcnow
 from app.services.patterns import detect_window
 from app.services.proactive import maybe_send
 
@@ -19,11 +22,112 @@ NO_AUTH = {"Authorization": ""}
 def test_login_and_me(client, auth):
     bad = client.post("/api/v1/auth/login", json={"username": "astronaut1", "password": "wrong"}, headers=NO_AUTH)
     assert bad.status_code == 401
+    logged_in = client.post(
+        "/api/v1/auth/login",
+        json={"username": "astronaut1", "password": "test-password"},
+        headers=NO_AUTH,
+    )
+    assert logged_in.status_code == 200
+    login_body = logged_in.json()
+    assert set(login_body) == {
+        "accessToken",
+        "tokenType",
+        "expiresIn",
+        "refreshToken",
+        "refreshExpiresIn",
+        "user",
+    }
+    assert login_body["expiresIn"] == 1800
+    assert login_body["refreshExpiresIn"] == 30 * 24 * 60 * 60
+    assert set(login_body["user"]) == {"username", "displayName", "role", "astronautId"}
     me = client.get("/api/v1/me", headers=auth("astronaut1")).json()
     assert me["astronautId"] == "A001" and me["missionDay"] == 180
     assert client.get("/api/v1/me").status_code == 403  # surgeon has no personal endpoints
     form = client.post("/api/v1/auth/token", data={"username": "surgeon", "password": "test-password"}, headers=NO_AUTH)
+    assert set(form.json()) == {
+        "access_token",
+        "token_type",
+        "expires_in",
+        "refresh_token",
+        "refresh_expires_in",
+    }
     assert form.json()["token_type"] == "bearer"
+    assert form.json()["expires_in"] == 1800
+    assert form.json()["refresh_token"]
+
+
+def test_refresh_rotates_tokens_and_replay_revokes_the_family(client):
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "astronaut2", "password": "test-password"},
+        headers=NO_AUTH,
+    )
+    original = login.json()["refreshToken"]
+    original_hash = hashlib.sha256(original.encode("utf-8")).hexdigest()
+    with db.SessionLocal() as session:
+        stored = session.scalar(select(UserRefreshToken).where(UserRefreshToken.token_hash == original_hash))
+        assert stored is not None
+        assert stored.token_hash != original
+
+    rotated = client.post("/api/v1/auth/refresh", json={"refreshToken": original}, headers=NO_AUTH)
+    assert rotated.status_code == 200
+    assert set(rotated.json()) == {
+        "accessToken",
+        "tokenType",
+        "expiresIn",
+        "refreshToken",
+        "refreshExpiresIn",
+        "user",
+    }
+    assert rotated.json()["refreshToken"] != original
+    assert 0 < rotated.json()["refreshExpiresIn"] <= login.json()["refreshExpiresIn"]
+    me = client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {rotated.json()['accessToken']}"},
+    )
+    assert me.status_code == 200
+
+    replay = client.post("/api/v1/auth/refresh", json={"refreshToken": original}, headers=NO_AUTH)
+    assert replay.status_code == 401
+    revoked_family = client.post(
+        "/api/v1/auth/refresh",
+        json={"refreshToken": rotated.json()["refreshToken"]},
+        headers=NO_AUTH,
+    )
+    assert revoked_family.status_code == 401
+
+
+def test_logout_revokes_refresh_session(client):
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "astronaut3", "password": "test-password"},
+        headers=NO_AUTH,
+    )
+    refresh_token = login.json()["refreshToken"]
+    access_token = login.json()["accessToken"]
+    response = client.post("/api/v1/auth/logout", json={"refreshToken": refresh_token}, headers=NO_AUTH)
+    assert response.status_code == 204
+    assert response.content == b""
+    assert client.post("/api/v1/auth/refresh", json={"refreshToken": refresh_token}, headers=NO_AUTH).status_code == 401
+    assert client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {access_token}"}).status_code == 200
+
+
+def test_expired_refresh_token_is_rejected(client):
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "astronaut4", "password": "test-password"},
+        headers=NO_AUTH,
+    )
+    refresh_token = login.json()["refreshToken"]
+    token_hash = hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
+    with db.SessionLocal() as session:
+        stored = session.scalar(select(UserRefreshToken).where(UserRefreshToken.token_hash == token_hash))
+        assert stored is not None
+        stored.expires_at = utcnow() - timedelta(seconds=1)
+        session.commit()
+
+    response = client.post("/api/v1/auth/refresh", json={"refreshToken": refresh_token}, headers=NO_AUTH)
+    assert response.status_code == 401
 
 
 def test_astronaut_sees_only_own_data(client, auth):

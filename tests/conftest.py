@@ -12,6 +12,7 @@ os.environ["RAW_CACHE_DIR"] = str(_TMP / "raw")
 os.environ.pop("ADMIN_API_KEY", None)
 os.environ["SCHEDULER_ENABLED"] = "false"
 os.environ["JWT_SECRET"] = "test-secret-" + "x" * 40
+os.environ["JWT_EXPIRE_MINUTES"] = "30"
 os.environ["DEMO_PASSWORD"] = "test-password"
 
 from fastapi.testclient import TestClient  # noqa: E402

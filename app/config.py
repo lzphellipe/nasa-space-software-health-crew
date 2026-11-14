@@ -73,7 +73,7 @@ class Settings:
 
     # Authentication
     jwt_secret: str | None = field(default_factory=lambda: os.getenv("JWT_SECRET") or None)
-    jwt_expire_minutes: int = field(default_factory=lambda: int(os.getenv("JWT_EXPIRE_MINUTES", "720")))
+    jwt_expire_minutes: int = field(default_factory=lambda: int(os.getenv("JWT_EXPIRE_MINUTES", "30")))
     seed_demo_users: bool = field(default_factory=lambda: _bool("SEED_DEMO_USERS", True))
     demo_password: str = field(default_factory=lambda: os.getenv("DEMO_PASSWORD", "spaceapps2026"))
 
