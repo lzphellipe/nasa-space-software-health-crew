@@ -6,14 +6,17 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
-from app import db
+from app import db, provenance
 from app.config import get_settings
 from app.routers import analog, auth, care, catalog, crew, dashboard, ingest, knowledge, me, missions
+from app.routers import app_ground, app_me, app_public
+from app.routers import provenance as provenance_router
 from app.services.ingest import database_is_empty, run_ingestion
+from app.cosmo.seed import seed_if_empty as seed_cosmo
 from app.services.knowledge import load_bundled
 from app.services.monitoring import backfill_if_empty, scheduler_loop
 from app.services.synthetic_store import load_synthetic, synthetic_is_empty
@@ -41,6 +44,8 @@ async def lifespan(_: FastAPI):
     with db.SessionLocal() as session:
         if settings.seed_demo_users:
             seed_demo_users(session, settings.demo_password)
+        if settings.app_seed_on_startup:
+            seed_cosmo(session, settings)
         if load_bundled(session):
             log.info("Indexed the bundled PDF knowledge base")
         result = backfill_if_empty(session)
@@ -77,7 +82,13 @@ app = FastAPI(
         "daily check-ins (stress, fatigue, symptoms), patterns found in a rolling 7-day window, "
         "proactive messages (at most one every 7 days, can be turned off) and requests for human "
         "support. The care team works from `/api/v1/care`. `/api/v1/knowledge` searches PDF documents "
-        "(NASA-STD-3001 Vol. 1 included). **Not a medical device.**"
+        "(NASA-STD-3001 Vol. 1 included).\n\n"
+        "Every item and main object carries a `provenance` value (REAL_RESEARCH_DATA, SIMULATED_TELEMETRY, "
+        "USER_REPORTED, RULE_DERIVED, REFERENCE_DOCUMENT; AI_GENERATED is reserved for the AI agent) and "
+        "every response an `X-Data-Provenance` header; see `/api/v1/provenance`.\n\n"
+        "`/api/v1/app` serves the **CosmoMedic** React Native app in its own data model (Crew ID + PIN login, "
+        "logs, daily summaries, Orbi alerts and notes, ground messages with communication delay, avatar, shop, "
+        "leaderboard, ground dashboard). **Not a medical device.**"
     ),
     lifespan=lifespan,
 )
@@ -89,14 +100,26 @@ app.add_middleware(
     allow_credentials="*" not in settings.cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Data-Provenance"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 for router in (
     auth.router, me.router, care.router, crew.router, dashboard.router, missions.router,
-    analog.router, knowledge.router, catalog.router, ingest.router,
+    analog.router, knowledge.router, catalog.router, ingest.router, provenance_router.router,
+    app_public.router, app_me.router, app_ground.router,
 ):
     app.include_router(router)
+
+
+@app.middleware("http")
+async def provenance_header(request: Request, call_next):
+    """Tell every client which kinds of data a route returns (see GET /api/v1/provenance)."""
+    response = await call_next(request)
+    values = provenance.for_path(request.url.path)
+    if values:
+        response.headers["X-Data-Provenance"] = ",".join(values)
+    return response
 
 
 @app.get("/health", tags=["meta"], summary="Liveness and data readiness")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+from app.provenance import DERIVED, SIMULATED
 from app.schemas import APIModel, StatusCounts
 
 
@@ -30,6 +31,8 @@ class MissionOut(APIModel):
     seed: int | None
     generated_at: datetime
     astronaut_count: int
+    provenance: str = SIMULATED
+
 
 
 class AstronautOut(APIModel):
@@ -48,6 +51,8 @@ class DailyRecordOut(APIModel):
     values: dict[str, float | None]
     metric_status: dict[str, str]
     status: str
+    provenance: str = SIMULATED
+
 
 
 class BaselineOut(APIModel):
@@ -69,6 +74,8 @@ class EpisodeOut(APIModel):
     measurements: int
     peak_value: float
     peak_day: int
+    provenance: str = DERIVED
+
 
 
 class MetricComparison(APIModel):
@@ -91,6 +98,8 @@ class AstronautDay(APIModel):
     status: str
     metrics: list[MetricComparison]
     active_episodes: list[EpisodeOut]
+    provenance: str = SIMULATED
+
 
 
 class CrewMemberDay(APIModel):
@@ -109,6 +118,8 @@ class MissionDashboard(APIModel):
     counts: StatusCounts
     crew: list[CrewMemberDay]
     status_by_day: list[dict]
+    provenance: str = SIMULATED
+
 
 
 class SeriesPoint(APIModel):
@@ -179,6 +190,8 @@ class AgentContext(APIModel):
     episodes: list[EpisodeOut]
     highlights: list[str]
     daily: list[DailyRecordOut] | None = None
+    provenance: str = SIMULATED
+
 
 
 class EventOut(APIModel):

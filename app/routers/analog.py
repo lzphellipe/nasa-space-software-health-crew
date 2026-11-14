@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.analog import agbresa
 from app.db import get_db
 from app.models import AnalogObservation, AnalogSubject, SourceFile
+from app.provenance import REAL
 from app.schemas import APIModel, SourceFileOut
 from app.services.analytics import STATUS_ORDER
 
@@ -61,6 +62,7 @@ class AnalogStudyOut(APIModel):
     metrics: list[AnalogMetricOut]
     files: list[SourceFileOut]
     invalid_values: int
+    provenance: str = REAL
 
 
 class SessionRef(APIModel):
@@ -99,6 +101,7 @@ class AnalogObservationOut(APIModel):
     status: str
     delta_vs_first: float | None
     pct_vs_first: float | None
+    provenance: str = REAL
 
 
 class SessionDetail(APIModel):
@@ -117,6 +120,7 @@ class AnalogSubjectDetail(APIModel):
     notice: str
     subject: AnalogSubjectOut
     sessions: list[SessionDetail]
+    provenance: str = REAL
 
 
 class GroupPoint(APIModel):

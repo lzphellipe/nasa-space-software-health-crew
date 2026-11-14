@@ -24,12 +24,30 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 from app.db import Base
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class UTCDateTime(TypeDecorator):
+    """Timestamps always come back timezone-aware in UTC (SQLite drops the offset)."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class Study(Base):
@@ -56,7 +74,7 @@ class SourceFile(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     row_count: Mapped[int] = mapped_column(Integer)
     measurement_count: Mapped[int] = mapped_column(Integer)
-    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ingested_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     study: Mapped[Study] = relationship(back_populates="files")
 
@@ -167,8 +185,8 @@ class IngestRun(Base):
     __tablename__ = "ingest_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     requested_source: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(20), default="running")  # running | success | failed
     files: Mapped[list] = mapped_column(JSON, default=list)
@@ -192,7 +210,7 @@ class Mission(Base):
     last_day: Mapped[int] = mapped_column(Integer)
     synthetic: Mapped[bool] = mapped_column(Boolean, default=True)
     seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    generated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class Astronaut(Base):
@@ -319,7 +337,7 @@ class User(Base):
     # the synthetic mission can be regenerated without touching accounts.
     astronaut_id: Mapped[str | None] = mapped_column(String(10), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class AstronautPreference(Base):
@@ -327,7 +345,7 @@ class AstronautPreference(Base):
 
     astronaut_id: Mapped[str] = mapped_column(String(10), primary_key=True)
     proactive_messages: Mapped[bool] = mapped_column(Boolean, default=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class CheckIn(Base):
@@ -343,8 +361,8 @@ class CheckIn(Base):
     symptoms: Mapped[list] = mapped_column(JSON, default=list)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(20))  # app | synthetic
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class PatternDetection(Base):
@@ -365,7 +383,7 @@ class PatternDetection(Base):
     severity: Mapped[str] = mapped_column(String(10))  # low | medium | high
     summary: Mapped[str] = mapped_column(Text)
     evidence: Mapped[dict] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class ProactiveMessage(Base):
@@ -380,7 +398,7 @@ class ProactiveMessage(Base):
     body: Mapped[str] = mapped_column(Text)
     actions: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), default="unread")  # unread | read | dismissed
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class SupportRequest(Base):
@@ -401,8 +419,8 @@ class SupportRequest(Base):
     response: Mapped[str | None] = mapped_column(Text, nullable=True)  # shown to the astronaut
     care_notes: Mapped[str | None] = mapped_column(Text, nullable=True)  # care team only
     notified: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class KnowledgeDocument(Base):
@@ -415,7 +433,7 @@ class KnowledgeDocument(Base):
     pages: Mapped[int] = mapped_column(Integer)
     source: Mapped[str] = mapped_column(String(20))  # bundled | upload
     uploaded_by: Mapped[str | None] = mapped_column(String(60), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     chunks: Mapped[list[KnowledgeChunk]] = relationship(back_populates="document", cascade="all, delete-orphan")
 

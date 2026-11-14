@@ -87,6 +87,12 @@ class Settings:
     )
     support_webhook_url: str | None = field(default_factory=lambda: os.getenv("SUPPORT_WEBHOOK_URL") or None)
 
+    # CosmoMedic app layer (/api/v1/app)
+    app_seed_on_startup: bool = field(default_factory=lambda: _bool("APP_SEED_ON_STARTUP", True))
+    # Mission day used as "today": empty = mission.json "today" (12), a number, or "auto" (from the calendar)
+    app_mission_day: str | None = field(default_factory=lambda: os.getenv("APP_MISSION_DAY") or None)
+    app_demo_pin: str = field(default_factory=lambda: os.getenv("APP_DEMO_PIN", "2026"))
+
     # PDF knowledge base
     knowledge_max_upload_mb: float = field(
         default_factory=lambda: float(os.getenv("KNOWLEDGE_MAX_UPLOAD_MB", "20"))

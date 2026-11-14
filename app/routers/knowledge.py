@@ -10,6 +10,7 @@ from app.auth.deps import get_current_user, require_care_team
 from app.config import get_settings
 from app.db import get_db
 from app.models import KnowledgeChunk, KnowledgeDocument, User
+from app.provenance import DOCUMENT
 from app.schemas import APIModel
 from app.services.knowledge import INDEX, KnowledgeError, add_document
 
@@ -24,6 +25,7 @@ class DocumentOut(APIModel):
     chunks: int
     source: str
     uploaded_by: str | None
+    provenance: str = DOCUMENT
 
 
 class HitOut(APIModel):
@@ -32,12 +34,14 @@ class HitOut(APIModel):
     page: int
     score: float
     snippet: str
+    provenance: str = DOCUMENT
 
 
 class SearchOut(APIModel):
     query: str
     total: int
     hits: list[HitOut]
+    provenance: str = DOCUMENT
 
 
 class PageOut(APIModel):
@@ -45,6 +49,7 @@ class PageOut(APIModel):
     document_title: str
     page: int
     text: str
+    provenance: str = DOCUMENT
 
 
 def document_out(db: Session, d: KnowledgeDocument) -> DocumentOut:

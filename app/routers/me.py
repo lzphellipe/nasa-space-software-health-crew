@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import Field, field_validator
+from pydantic import Field, computed_field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,7 @@ from app.models import (
     User,
     utcnow,
 )
+from app.provenance import DERIVED, checkin_provenance, support_provenance
 from app.schemas import APIModel
 from app.services.monitoring import current_day, current_mission
 from app.services.patterns import PATTERN_LABELS
@@ -60,6 +61,11 @@ class CheckInOut(APIModel):
     notes: str | None
     source: str
 
+    @computed_field
+    @property
+    def provenance(self) -> str:
+        return checkin_provenance(self.source)
+
 
 class CheckInResult(APIModel):
     checkin: CheckInOut
@@ -90,6 +96,7 @@ class PatternOut(APIModel):
     severity: str
     summary: str
     evidence: dict
+    provenance: str = DERIVED
 
 
 class MessageOut(APIModel):
@@ -100,6 +107,7 @@ class MessageOut(APIModel):
     patterns: list[str]
     actions: list[str]
     status: str
+    provenance: str = DERIVED
 
 
 class PreferencesIn(APIModel):
@@ -130,6 +138,11 @@ class SupportOut(APIModel):
     response: str | None
     created_at: datetime
     updated_at: datetime
+
+    @computed_field
+    @property
+    def provenance(self) -> str:
+        return support_provenance(self.reason)
 
 
 class MeOut(APIModel):

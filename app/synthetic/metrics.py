@@ -34,8 +34,12 @@ class Metric:
         return {"daily": 2, "weekly": 7, "monthly": 31}[self.cadence]
 
     def thresholds(self) -> dict:
-        keys = ("out_high", "out_low", "watch_high", "watch_low", "out_rel_low", "watch_rel_low")
-        return {k: v for k, v in asdict(self).items() if k in keys and v is not None}
+        """Thresholds with camelCase keys, like every other JSON key of the API."""
+        keys = {
+            "out_high": "outHigh", "out_low": "outLow", "watch_high": "watchHigh", "watch_low": "watchLow",
+            "out_rel_low": "outRelLowPct", "watch_rel_low": "watchRelLowPct",
+        }
+        return {keys[k]: v for k, v in asdict(self).items() if k in keys and v is not None}
 
 
 METRICS: list[Metric] = [

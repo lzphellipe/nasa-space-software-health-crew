@@ -7,6 +7,8 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
+from app.provenance import REAL
+
 
 class APIModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, from_attributes=True)
@@ -89,6 +91,7 @@ class MeasurementOut(APIModel):
     delta_pct: float | None
     z_score: float | None
     status: str
+    provenance: str = REAL
 
 
 class Page(APIModel):
@@ -175,6 +178,7 @@ class CrewSummary(APIModel):
     counts: StatusCounts
     categories: list[CategorySummary]
     alerts: list[Alert]
+    provenance: str = REAL
 
 
 class TimelineEntry(APIModel):
@@ -213,6 +217,7 @@ class Overview(APIModel):
     timepoints: list[TimepointStatus]
     crew: list[CrewMemberOut]
     last_ingest: IngestRunOut | None
+    provenance: str = REAL
 
 
 class HeatmapCell(APIModel):
