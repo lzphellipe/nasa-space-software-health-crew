@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -11,8 +12,12 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app import db
 from app.config import get_settings
-from app.routers import catalog, crew, dashboard, ingest
+from app.routers import analog, auth, care, catalog, crew, dashboard, ingest, knowledge, me, missions
 from app.services.ingest import database_is_empty, run_ingestion
+from app.services.knowledge import load_bundled
+from app.services.monitoring import backfill_if_empty, scheduler_loop
+from app.services.synthetic_store import load_synthetic, synthetic_is_empty
+from app.services.users import seed_demo_users
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("crew-health-api")
@@ -28,18 +33,51 @@ async def lifespan(_: FastAPI):
                 log.info("Empty database: ingesting OSDR data (source=%s)", settings.ingest_source)
                 run = run_ingestion(session, settings)
                 log.info("Ingestion %s; warnings: %s", run.status, run.warnings or "none")
+    if settings.synthetic_on_startup:
+        with db.SessionLocal() as session:
+            if synthetic_is_empty(session):
+                mission = load_synthetic(session, settings.synthetic_seed)
+                log.info("Generated synthetic mission %s (seed=%s)", mission.id, mission.seed)
+    with db.SessionLocal() as session:
+        if settings.seed_demo_users:
+            seed_demo_users(session, settings.demo_password)
+        if load_bundled(session):
+            log.info("Indexed the bundled PDF knowledge base")
+        result = backfill_if_empty(session)
+        if result:
+            log.info("Replayed pattern detection over the mission history: %s", result)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(scheduler_loop(stop)) if settings.scheduler_enabled else None
     yield
+    if task:
+        stop.set()
+        await task
 
 
 app = FastAPI(
     title="Crew Health API",
     version="1.0.0",
-    summary="Astronaut blood panels from NASA OSDR (OSD-569, OSD-575), normalized for apps and dashboards.",
+    summary=(
+        "Astronaut blood panels from NASA OSDR (OSD-569, OSD-575) and a synthetic daily-vitals "
+        "history for a 6-month mission, normalized for apps, dashboards and an AI agent."
+    ),
     description=(
         "Complete blood count, comprehensive metabolic panel and a multiplex cardiovascular panel "
         "for the four SpaceX Inspiration4 crew members, collected from L-92 to R+194. Each value is "
         "checked against the lab reference range and against the crew member's own pre-flight "
-        "baseline. **Not a medical device.**"
+        "baseline.\n\n"
+        "`/api/v1/missions` serves a **synthetic** long-duration mission: 4 astronauts, a 30-day "
+        "pre-flight baseline and 180 days in flight with daily blood pressure, heart rate, glucose, "
+        "body temperature, sleep and mood, plus bone density, nutrition and white cells.\n\n"
+        "`/api/v1/analog/agbresa` serves **real** heart rate, blood pressure, sleepiness, motion "
+        "sickness and mood from the AGBRESA 60-day bed rest study (DLR/ESA/NASA), an Earth analog "
+        "with healthy volunteers.\n\n"
+        "Astronauts log in (`/api/v1/auth/login`) and see only their own data under `/api/v1/me`: "
+        "daily check-ins (stress, fatigue, symptoms), patterns found in a rolling 7-day window, "
+        "proactive messages (at most one every 7 days, can be turned off) and requests for human "
+        "support. The care team works from `/api/v1/care`. `/api/v1/knowledge` searches PDF documents "
+        "(NASA-STD-3001 Vol. 1 included). **Not a medical device.**"
     ),
     lifespan=lifespan,
 )
@@ -54,7 +92,10 @@ app.add_middleware(
 )
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
-for router in (crew.router, dashboard.router, catalog.router, ingest.router):
+for router in (
+    auth.router, me.router, care.router, crew.router, dashboard.router, missions.router,
+    analog.router, knowledge.router, catalog.router, ingest.router,
+):
     app.include_router(router)
 
 

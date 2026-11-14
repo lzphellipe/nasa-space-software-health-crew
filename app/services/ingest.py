@@ -30,6 +30,7 @@ from app.osdr.analytes import MULTIPLEX_NOTE, describe
 from app.osdr.client import OSDRClient, OSDRError
 from app.osdr.datasets import DATASETS, MISSION, STUDIES, DatasetSpec
 from app.osdr.parser import parse_csv, parse_timepoint
+from app.services.analog_ingest import ingest_agbresa
 from app.services.analytics import recompute_derived
 
 log = logging.getLogger(__name__)
@@ -249,6 +250,7 @@ def run_ingestion(
             files.append(ingest_dataset(session, spec, fetched, settings, force, warnings))
         session.flush()
         recompute_derived(session, settings)
+        files.extend(ingest_agbresa(session, settings, source, force, warnings))
         run.status = "success"
     except Exception as exc:  # keep the run record, roll back the data
         session.rollback()

@@ -8,11 +8,12 @@ own pre-flight baseline.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -173,3 +174,259 @@ class IngestRun(Base):
     files: Mapped[list] = mapped_column(JSON, default=list)
     warnings: Mapped[list] = mapped_column(JSON, default=list)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# --- Synthetic long-duration mission (daily vital signs) ------------------
+# OSDR has no daily vitals for any crew, so these tables hold a generated
+# dataset (see app/synthetic). Every row belongs to a mission flagged synthetic.
+
+
+class Mission(Base):
+    __tablename__ = "missions"
+
+    id: Mapped[str] = mapped_column(String(30), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text)
+    launch_date: Mapped[date] = mapped_column(Date)
+    first_day: Mapped[int] = mapped_column(Integer)
+    last_day: Mapped[int] = mapped_column(Integer)
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=True)
+    seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Astronaut(Base):
+    __tablename__ = "astronauts"
+
+    id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(ForeignKey("missions.id", ondelete="CASCADE"))
+    display_name: Mapped[str] = mapped_column(String(60))
+    role: Mapped[str] = mapped_column(String(60))
+
+
+class DailyRecord(Base):
+    __tablename__ = "daily_records"
+    __table_args__ = (
+        UniqueConstraint("astronaut_id", "mission_day", name="uq_daily_astronaut_day"),
+        Index("ix_daily_mission_day", "mission_id", "mission_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("astronauts.id", ondelete="CASCADE"))
+    mission_id: Mapped[str] = mapped_column(ForeignKey("missions.id", ondelete="CASCADE"))
+    mission_day: Mapped[int] = mapped_column(Integer)
+    date: Mapped[date] = mapped_column(Date)
+    phase: Mapped[str] = mapped_column(String(20))  # preflight | inflight
+
+    # Required daily metrics
+    systolic_bp: Mapped[float] = mapped_column(Float)
+    diastolic_bp: Mapped[float] = mapped_column(Float)
+    heart_rate: Mapped[float] = mapped_column(Float)
+    blood_glucose: Mapped[float] = mapped_column(Float)
+    body_temperature: Mapped[float] = mapped_column(Float)
+    sleep_hours: Mapped[float] = mapped_column(Float)
+    mood: Mapped[int] = mapped_column(Integer)
+    # Optional metrics (null on days without a measurement)
+    bone_density: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calorie_intake: Mapped[float | None] = mapped_column(Float, nullable=True)
+    protein_intake: Mapped[float | None] = mapped_column(Float, nullable=True)
+    white_blood_cells: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    metric_status: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20))  # worst metric status of the day
+
+
+class VitalBaseline(Base):
+    __tablename__ = "vital_baselines"
+
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("astronauts.id", ondelete="CASCADE"), primary_key=True)
+    metric: Mapped[str] = mapped_column(String(40), primary_key=True)
+    n: Mapped[int] = mapped_column(Integer)
+    mean: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sd_effective: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class SyntheticEvent(Base):
+    """Ground truth injected by the generator, for evaluating the AI agent."""
+
+    __tablename__ = "synthetic_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    mission_id: Mapped[str] = mapped_column(ForeignKey("missions.id", ondelete="CASCADE"))
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("astronauts.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(60))
+    start_day: Mapped[int] = mapped_column(Integer)
+    end_day: Mapped[int] = mapped_column(Integer)
+    description: Mapped[str] = mapped_column(Text)
+    affected_metrics: Mapped[list] = mapped_column(JSON, default=list)
+
+
+# --- AGBRESA bed rest study (real data, Earth analog) ----------------------
+# Healthy volunteers in 60-day head-down-tilt bed rest; not astronauts.
+# The study and its two files are recorded in `studies` / `source_files`.
+
+
+class AnalogSubject(Base):
+    __tablename__ = "analog_subjects"
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)  # "AGB-A"
+    study_id: Mapped[str] = mapped_column(ForeignKey("studies.id"))
+    code: Mapped[str] = mapped_column(String(10))  # "A" (S2) / "0A" (S1) in the source
+    group: Mapped[str] = mapped_column(String(20))  # intermittent | continuous | control
+    sex: Mapped[str] = mapped_column(String(10))
+    age_group: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    campaign: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
+
+class AnalogObservation(Base):
+    __tablename__ = "analog_observations"
+    __table_args__ = (
+        UniqueConstraint("subject_id", "session", "metric", "moment", name="uq_analog_obs"),
+        Index("ix_analog_obs_metric", "metric", "moment"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    subject_id: Mapped[str] = mapped_column(ForeignKey("analog_subjects.id", ondelete="CASCADE"))
+    source_file_id: Mapped[int] = mapped_column(ForeignKey("source_files.id", ondelete="CASCADE"))
+    session: Mapped[str] = mapped_column(String(20))  # "HDT1", "HDT29", ...
+    session_index: Mapped[int] = mapped_column(Integer)  # 1 begin, 2 middle, 3 end
+    bed_rest_day: Mapped[int] = mapped_column(Integer)
+    month: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    metric: Mapped[str] = mapped_column(String(40))
+    moment: Mapped[str] = mapped_column(String(10))  # pre | during | post | single
+    raw_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    value: Mapped[float | None] = mapped_column(Float, nullable=True)  # null when implausible
+    quality: Mapped[str] = mapped_column(String(20))  # ok | implausible
+    quality_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20))
+    delta_vs_first: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pct_vs_first: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+# --- Users, check-ins, patterns, proactive messages, human support ----------
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(60), unique=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    password_hash: Mapped[str] = mapped_column(String(200))
+    role: Mapped[str] = mapped_column(String(20))  # astronaut | medical | admin
+    # Astronaut this account belongs to (role astronaut only). Not a foreign key:
+    # the synthetic mission can be regenerated without touching accounts.
+    astronaut_id: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AstronautPreference(Base):
+    __tablename__ = "astronaut_preferences"
+
+    astronaut_id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    proactive_messages: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CheckIn(Base):
+    __tablename__ = "checkins"
+    __table_args__ = (UniqueConstraint("astronaut_id", "mission_day", name="uq_checkin_day"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    astronaut_id: Mapped[str] = mapped_column(String(10), index=True)
+    mission_id: Mapped[str] = mapped_column(String(30))
+    mission_day: Mapped[int] = mapped_column(Integer)
+    stress: Mapped[int] = mapped_column(Integer)  # 1 very low … 5 very high
+    fatigue: Mapped[int] = mapped_column(Integer)  # 1 very low … 5 very high
+    symptoms: Mapped[list] = mapped_column(JSON, default=list)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(20))  # app | synthetic
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PatternDetection(Base):
+    __tablename__ = "pattern_detections"
+    __table_args__ = (
+        UniqueConstraint("astronaut_id", "as_of_day", "pattern", "detail", name="uq_detection"),
+        Index("ix_detection_astronaut_day", "astronaut_id", "as_of_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    astronaut_id: Mapped[str] = mapped_column(String(10))
+    mission_id: Mapped[str] = mapped_column(String(30))
+    as_of_day: Mapped[int] = mapped_column(Integer)
+    window_start: Mapped[int] = mapped_column(Integer)
+    window_end: Mapped[int] = mapped_column(Integer)
+    pattern: Mapped[str] = mapped_column(String(40))
+    detail: Mapped[str] = mapped_column(String(40), default="")
+    severity: Mapped[str] = mapped_column(String(10))  # low | medium | high
+    summary: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ProactiveMessage(Base):
+    __tablename__ = "proactive_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    astronaut_id: Mapped[str] = mapped_column(String(10), index=True)
+    mission_id: Mapped[str] = mapped_column(String(30))
+    mission_day: Mapped[int] = mapped_column(Integer)
+    patterns: Mapped[list] = mapped_column(JSON, default=list)
+    title: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(Text)
+    actions: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="unread")  # unread | read | dismissed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SupportRequest(Base):
+    __tablename__ = "support_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    astronaut_id: Mapped[str] = mapped_column(String(10), index=True)
+    mission_id: Mapped[str] = mapped_column(String(30))
+    mission_day: Mapped[int] = mapped_column(Integer)
+    # astronaut_request | urgent_symptom | pattern
+    reason: Mapped[str] = mapped_column(String(30))
+    detail: Mapped[str] = mapped_column(String(60), default="")
+    topic: Mapped[str] = mapped_column(String(30))  # medical | psychological | family | operational | other
+    priority: Mapped[str] = mapped_column(String(10))  # routine | urgent
+    message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="open")  # open | acknowledged | resolved
+    assigned_to: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    response: Mapped[str | None] = mapped_column(Text, nullable=True)  # shown to the astronaut
+    care_notes: Mapped[str | None] = mapped_column(Text, nullable=True)  # care team only
+    notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KnowledgeDocument(Base):
+    __tablename__ = "knowledge_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(300))
+    file_name: Mapped[str] = mapped_column(String(300))
+    sha256: Mapped[str] = mapped_column(String(64), unique=True)
+    pages: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(20))  # bundled | upload
+    uploaded_by: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    chunks: Mapped[list[KnowledgeChunk]] = relationship(back_populates="document", cascade="all, delete-orphan")
+
+
+class KnowledgeChunk(Base):
+    __tablename__ = "knowledge_chunks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("knowledge_documents.id", ondelete="CASCADE"))
+    page: Mapped[int] = mapped_column(Integer)
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+
+    document: Mapped[KnowledgeDocument] = relationship(back_populates="chunks")

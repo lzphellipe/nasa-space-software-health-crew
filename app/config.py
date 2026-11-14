@@ -63,6 +63,35 @@ class Settings:
         default_factory=lambda: int(os.getenv("MISSION_DURATION_DAYS", "3"))
     )
 
+    # Synthetic long-duration mission (daily vitals)
+    synthetic_on_startup: bool = field(default_factory=lambda: _bool("SYNTHETIC_ON_STARTUP", True))
+    synthetic_seed: int = field(default_factory=lambda: int(os.getenv("SYNTHETIC_SEED", "42")))
+    # Simulated "today" of the mission; default: the last day of the synthetic dataset.
+    current_mission_day: int | None = field(
+        default_factory=lambda: int(os.environ["CURRENT_MISSION_DAY"]) if os.getenv("CURRENT_MISSION_DAY") else None
+    )
+
+    # Authentication
+    jwt_secret: str | None = field(default_factory=lambda: os.getenv("JWT_SECRET") or None)
+    jwt_expire_minutes: int = field(default_factory=lambda: int(os.getenv("JWT_EXPIRE_MINUTES", "720")))
+    seed_demo_users: bool = field(default_factory=lambda: _bool("SEED_DEMO_USERS", True))
+    demo_password: str = field(default_factory=lambda: os.getenv("DEMO_PASSWORD", "spaceapps2026"))
+
+    # Pattern detection, proactive messages and human support
+    scheduler_enabled: bool = field(default_factory=lambda: _bool("SCHEDULER_ENABLED", True))
+    detection_interval_minutes: float = field(
+        default_factory=lambda: float(os.getenv("DETECTION_INTERVAL_MINUTES", "60"))
+    )
+    proactive_min_interval_days: int = field(
+        default_factory=lambda: int(os.getenv("PROACTIVE_MIN_INTERVAL_DAYS", "7"))
+    )
+    support_webhook_url: str | None = field(default_factory=lambda: os.getenv("SUPPORT_WEBHOOK_URL") or None)
+
+    # PDF knowledge base
+    knowledge_max_upload_mb: float = field(
+        default_factory=lambda: float(os.getenv("KNOWLEDGE_MAX_UPLOAD_MB", "20"))
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:
