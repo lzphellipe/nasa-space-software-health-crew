@@ -1,3 +1,4 @@
+
 """Database engine and session handling (SQLite by default, any SQLAlchemy URL works)."""
 
 from __future__ import annotations
@@ -41,8 +42,9 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def init_db(bind: Engine | None = None) -> None:
-    from app import models  # noqa: F401  (register tables)
+    from app import models  # noqa: F401
     from app.cosmo import models as cosmo_models  # noqa: F401
+    from app.report import report_models  # noqa: F401
 
     Base.metadata.create_all(bind=bind or engine)
 

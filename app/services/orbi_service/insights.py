@@ -261,7 +261,11 @@ def _analyze_metric(records, baseline, metric, day):
             if len(recent) >= 2
             else None
         ),
-        "status": "available" if fresh else "stale",
+        "status": (
+            "stale" if not fresh else
+            "insufficient_data" if len(recent) < 2 else
+            "available"
+        ),
         "priority": 0,
         "evidence": [],
         "trend": trend,
@@ -421,6 +425,7 @@ def build_insight(
             "missionId": mission.id,
             "astronautId": astronaut.id,
             "missionDay": day,
+            "status": "disabled",
             "message": (
                 "No verified measurements are available "
                 "for this section yet."
@@ -501,7 +506,7 @@ def build_insight(
         available = [
             analysis
             for analysis in analyses
-            if analysis["status"] == "available"
+            if analysis["status"] in ("available", "insufficient_data")
         ]
 
         if available:
@@ -520,11 +525,22 @@ def build_insight(
                 "to provide a reliable briefing."
             )
 
+    metric_statuses = {analysis["status"] for analysis in analyses}
+    if "available" in metric_statuses:
+        page_status = "available"
+    elif "insufficient_data" in metric_statuses:
+        page_status = "insufficient_data"
+    elif "stale" in metric_statuses:
+        page_status = "stale"
+    else:
+        page_status = "no_data"
+
     return {
         "page": page,
         "missionId": mission.id,
         "astronautId": astronaut.id,
         "missionDay": day,
+        "status": page_status,
         "message": message,
         "metrics": analyses,
         "dataSource": "SIMULATED_TELEMETRY",
