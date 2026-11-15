@@ -316,9 +316,9 @@ Ground-truth events are deliberately **not** included, so they can be used to sc
 | GET | `/api/v1/missions` | the mission (flagged `synthetic`) |
 | GET | `/api/v1/missions/{id}/metrics` | metric definitions and thresholds |
 | GET | `/api/v1/missions/{id}/astronauts` | crew |
-| GET | `/api/v1/missions/{id}/astronauts/{aid}/today?day=` | app home: one day vs baseline, latest bone/WBC values, active episodes |
-| GET | `/api/v1/missions/{id}/astronauts/{aid}/daily?fromDay=&toDay=` | daily records |
-| GET | `/api/v1/missions/{id}/astronauts/{aid}/baseline` | 30-day pre-flight baseline |
+| GET | `/api/v1/missions/{id}/astronauts/{aid}/today?day=` | app home: one day vs baseline (`metrics` list and the same entries keyed by metric in `values`), one-line `summary`, latest bone/WBC values, active episodes |
+| GET | `/api/v1/missions/{id}/astronauts/{aid}/daily?fromDay=&toDay=` | daily records, each with a one-line `summary` of the vitals |
+| GET | `/api/v1/missions/{id}/astronauts/{aid}/baseline` | 30-day pre-flight baseline: object with `summary`, `values` (mean per metric) and `metrics` (n, mean, SD per metric) |
 | GET | `/api/v1/missions/{id}/astronauts/{aid}/episodes?fromDay=&toDay=` | episodes of one astronaut |
 | GET | `/api/v1/missions/{id}/astronauts/{aid}/agent-context?windowDays=90&untilDay=&includeDaily=` | AI agent context |
 | GET | `/api/v1/missions/{id}/dashboard?day=` | crew status on a day, plus status counts for every day |
@@ -332,10 +332,11 @@ Daily records come as `values` and `metricStatus` objects keyed by metric code, 
 
 ```json
 {
-  "astronautId": "A002", "missionId": "SYN-LDM-01", "missionDay": 49, "date": "2027-04-19", "phase": "inflight",
+  "missionDay": 49, "status": "out_of_range",
+  "summary": "BP 111/71 mmHg · HR 71 bpm · glucose 88 mg/dL · 38.4 °C · sleep 5.8 h · mood 3/5",
+  "date": "2027-04-19", "phase": "inflight", "astronautId": "A002", "missionId": "SYN-LDM-01",
   "values": { "systolic_bp": 111, "heart_rate": 71, "body_temperature": 38.43, "sleep_hours": 5.8, "mood": 3, "white_blood_cells": 11.3, "...": "..." },
-  "metricStatus": { "body_temperature": "out_of_range", "white_blood_cells": "out_of_range", "protein_intake": "out_of_range", "sleep_hours": "watch", "...": "..." },
-  "status": "out_of_range"
+  "metricStatus": { "body_temperature": "out_of_range", "white_blood_cells": "out_of_range", "protein_intake": "out_of_range", "sleep_hours": "watch", "...": "..." }
 }
 ```
 

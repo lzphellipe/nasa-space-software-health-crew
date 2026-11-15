@@ -18,6 +18,7 @@ from app.db import get_db
 from app.models import Astronaut, DailyRecord, Mission, PatternDetection, ProactiveMessage, SyntheticEvent, User
 from app.schemas import StatusCounts
 from app.schemas_missions import (
+    BaselineSummary,
     AgentContext,
     AgentWindow,
     AstronautDay,
@@ -81,10 +82,28 @@ def mission_out(db: Session, mission: Mission) -> MissionOut:
     )
 
 
+def _num(v: float | None, digits: int = 0) -> str:
+    return "—" if v is None else f"{v:.{digits}f}"
+
+
+def vitals_summary(v: dict[str, float | None]) -> str:
+    """One readable line with the required daily vitals."""
+    parts = [
+        f"BP {_num(v.get('systolic_bp'))}/{_num(v.get('diastolic_bp'))} mmHg",
+        f"HR {_num(v.get('heart_rate'))} bpm",
+        f"glucose {_num(v.get('blood_glucose'))} mg/dL",
+        f"{_num(v.get('body_temperature'), 1)} °C",
+        f"sleep {_num(v.get('sleep_hours'), 1)} h",
+        f"mood {_num(v.get('mood'))}/5",
+    ]
+    return " · ".join(parts)
+
+
 def record_out(r: DailyRecord) -> DailyRecordOut:
+    values = {m.code: getattr(r, m.code) for m in METRICS}
     return DailyRecordOut(
         astronaut_id=r.astronaut_id, mission_id=r.mission_id, mission_day=r.mission_day, date=r.date,
-        phase=r.phase, values={m.code: getattr(r, m.code) for m in METRICS},
+        phase=r.phase, values=values, summary=vitals_summary(values),
         metric_status=r.metric_status, status=r.status,
     )
 
@@ -206,18 +225,25 @@ def astronaut_today(
     active = [e for e in episodes_for(records) if e.end_day >= day - METRICS_BY_CODE[e.metric].max_gap_days]
     return AstronautDay(
         astronaut=AstronautOut.model_validate(astronaut), mission_day=day, date=today.date, phase=today.phase,
-        status=worst(m.status for m in metrics), metrics=metrics, active_episodes=active,
+        status=worst(m.status for m in metrics), summary=vitals_summary({m.metric: m.value for m in metrics}),
+        metrics=metrics, values={m.metric: m for m in metrics}, active_episodes=active,
     )
 
 
-@router.get("/{mission_id}/astronauts/{astronaut_id}/baseline", response_model=list[BaselineOut], summary="30-day pre-flight baseline")
+@router.get("/{mission_id}/astronauts/{astronaut_id}/baseline", response_model=BaselineSummary, summary="30-day pre-flight baseline")
 def astronaut_baseline(
     mission_id: str, astronaut_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ):
     mission = get_mission_or_404(db, mission_id)
     astronaut = get_astronaut_or_404(db, mission, astronaut_id)
     assert_can_access(user, astronaut.id)
-    return [BaselineOut(**b.as_dict()) for b in get_baselines(db, astronaut.id).values()]
+    baselines = get_baselines(db, astronaut.id)
+    means = {code: baselines[code].mean if code in baselines else None for code in METRICS_BY_CODE}
+    return BaselineSummary(
+        astronaut_id=astronaut.id, mission_id=mission.id, from_day=mission.first_day, to_day=-1,
+        summary=vitals_summary(means), values=means,
+        metrics=[BaselineOut(**b.as_dict()) for b in baselines.values()],
+    )
 
 
 @router.get("/{mission_id}/astronauts/{astronaut_id}/episodes", response_model=list[EpisodeOut], summary="Watch / out-of-range episodes")
