@@ -29,8 +29,9 @@ def test_header(client, path, expected):
     assert response.headers["X-Data-Provenance"] == expected
 
 
-def test_no_route_claims_ai_generated():
-    assert all(Provenance.AI_GENERATED.value not in values for _, values in ROUTES)
+def test_only_the_orbi_insight_routes_claim_ai_generated():
+    claimed = [prefix for prefix, values in ROUTES if Provenance.AI_GENERATED.value in values]
+    assert claimed == ["/api/v1/orbi"]
 
 
 def test_item_level_values(client, auth):

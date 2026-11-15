@@ -1,0 +1,24 @@
+"""Manual check of the Groq key: python scripts/check_groq.py (needs GROQ_API_KEY). Not part of the test suite."""
+
+import os
+
+from dotenv import load_dotenv
+from groq import Groq
+
+
+load_dotenv()
+
+client = Groq(api_key=os.environ["GROQ_API_KEY"])
+
+response = client.chat.completions.create(
+    model="openai/gpt-oss-120b",
+    messages=[
+        {
+            "role": "user",
+            "content": "Explain microgravity in two sentences.",
+        }
+    ],
+    max_completion_tokens=200,
+)
+
+print(response.choices[0].message.content)

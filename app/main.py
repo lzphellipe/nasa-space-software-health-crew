@@ -1,6 +1,9 @@
 """Crew Health API: NASA OSDR blood panels from the Inspiration4 crew, cleaned and served."""
 
 from __future__ import annotations
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import asyncio
 import logging

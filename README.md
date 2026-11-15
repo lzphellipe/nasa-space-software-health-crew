@@ -294,7 +294,7 @@ Every item has a `provenance` and every response an `X-Data-Provenance` header; 
 | `USER_REPORTED` | typed in by the astronaut |
 | `RULE_DERIVED` | computed by documented rules, no AI |
 | `REFERENCE_DOCUMENT` | text from the PDF knowledge base |
-| `AI_GENERATED` | reserved for a language model; this API never emits it |
+| `AI_GENERATED` | text written by a language model: only `/api/v1/orbi` (insights and consultation briefings), when `ORBI_AI_ENABLED=true` and `GROQ_API_KEY` is set; each answer says so in `aiGenerated` and `messageSource` |
 | `DEVICE_MEASURED` | sent by a paired wearable, cuff, dosimeter or EVA suit |
 
 ### Replacing the mock in the frontend
@@ -806,7 +806,7 @@ See `.env.example`. Main variables: `DATABASE_URL`, `JWT_SECRET`, `SEED_DEMO_USE
 
 - **Pattern rules and messages are illustrative.** Thresholds are generic screening values and the message texts were not reviewed by a clinician or psychologist. They show how the system works; they are not medical criteria.
 - **The scheduler runs inside the API process.** With several workers, each runs it; use one worker or move the cycle to a separate job for production.
-- **No AI agent.** `/agent-context` only prepares data; nothing in this service calls a language model.
+- **AI agent only in `/api/v1/orbi`.** Insights and consultation briefings call a language model (CrewAI with Groq) when `ORBI_AI_ENABLED=true` and `GROQ_API_KEY` is set, and then send selected (simulated) health measurements to that provider; without them the text is statistical (`messageSource: statistical_fallback`). The model's text is not clinically validated. See `app/ORBI_STEP2_README.md`. The rest of the service, including the CosmoMedic chat, is rule-based.
 - **AGBRESA is an analog.** Bed rest reproduces some effects of microgravity (fluid shift, deconditioning) in healthy volunteers on Earth; it is not spaceflight, and these are not the Inspiration4 crew. Do not join it with the other data sets as if it described the same people.
 - **Synthetic mission.** The daily vitals are generated, not measured. Effects follow published orders of magnitude for long ISS stays, but the individual curves, events and thresholds are illustrative. Use the data to build and evaluate the agent and the apps, not to draw physiological conclusions.
 - **Four people, seven timepoints.** The baseline uses three samples per person; z-scores are indicative, not statistical tests.

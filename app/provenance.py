@@ -60,8 +60,9 @@ TYPES = [
     {
         "code": AI,
         "label": "AI generated",
-        "description": "Reserved for content written by a language model (the AI agent). "
-                       "This API never produces it; the agent must label its own output with it.",
+        "description": "Text written by a language model. Only /api/v1/orbi produces it (insights and "
+                       "consultation briefings), when ORBI_AI_ENABLED is on and a model key is set; each "
+                       "answer says so in aiGenerated and messageSource.",
     },
     {
         "code": DEVICE,
@@ -165,6 +166,7 @@ ROUTES: list[tuple[str, list[str]]] = [
     ("/api/v1/app/me/offline-bundle", [USER, DEVICE, SIMULATED, DERIVED]),
     ("/api/v1/app/me/ground-messages", [USER, SIMULATED]),
     ("/api/v1/app/me", [USER, SIMULATED, DERIVED]),
+    ("/api/v1/orbi", [SIMULATED, DERIVED, AI]),
     ("/api/v1/app/ground/messages", [USER, SIMULATED]),
     ("/api/v1/app/ground/environment", [SIMULATED]),
     ("/api/v1/app/ground", [USER, SIMULATED, DERIVED]),
