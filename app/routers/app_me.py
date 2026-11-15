@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import uuid
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.deps import get_current_user
-from app.cosmo import logic, views
-from app.cosmo.models import AppAlert, AppAstronaut, AppCalendarEvent, AppGroundMessage, AppJournalEntry, AppLog, AppShopItem
+from app.config import get_settings
+from app.cosmo import logic, nutrition, orbi, views
+from app.cosmo.models import (
+    AppAlert,
+    AppAstronaut,
+    AppCalendarEvent,
+    AppChatMessage,
+    AppGroundMessage,
+    AppJournalEntry,
+    AppLog,
+    AppPlanMeal,
+    AppShopItem,
+)
 from app.cosmo.schemas import (
     AlertOut,
     DailySummaryOut,
@@ -21,6 +34,7 @@ from app.cosmo.schemas import (
     LogIn,
     LogOut,
     LogSaved,
+    OrbiChatIn,
 )
 from app.cosmo.service import evaluate, maybe_note, new_id, send_message, sync_alerts
 from app.db import get_db
@@ -121,7 +135,55 @@ def summaries(from_day: int | None = Query(None, alias="fromDay"), to_day: int |
 # --- logs ---------------------------------------------------------------------------------
 
 
-def _store_data(body, astronaut: AppAstronaut) -> dict:
+def _meal_data(db: Session, body, astronaut: AppAstronaut, log_id: str | None) -> dict:
+    """Compute what was eaten: from the planned meal and its adherence, from swaps, or as sent (free meal)."""
+    d = body.data
+    out: dict = {}
+    scale = lambda total, pct: {k: round(v * pct / 100, 1) for k, v in total.items()}
+    swapped, foods = None, []
+    if d.swaps:
+        try:
+            swapped, foods = nutrition.nutrition_of(db, [(x.food_id, x.servings) for x in d.swaps])
+        except KeyError as exc:
+            raise HTTPException(422, f"Unknown foodId {exc.args[0]!r}; see GET /api/v1/app/foods") from None
+        out["swaps"] = [{"foodId": x.food_id, "servings": x.servings, "name": f.name} for x, f in zip(d.swaps, foods)]
+
+    if d.plan_meal_id:
+        pm = db.get(AppPlanMeal, d.plan_meal_id)
+        if pm is None or pm.astronaut_id != astronaut.id:
+            raise HTTPException(422, f"planMealId {d.plan_meal_id!r} is not in your meal plan")
+        other = next((l for l in views.astronaut_logs(db, astronaut.id)
+                      if l.type == "meal" and l.data.get("planMealId") == pm.id and l.id != log_id), None)
+        if other is not None:
+            raise HTTPException(409, f"This planned meal is already logged ({other.id}); edit it with PUT /logs/{other.id}")
+        planned = {n: getattr(pm, n) for n in nutrition.NUTRIENTS}
+        if d.adherence == "swapped":
+            pct = d.eaten_pct if d.eaten_pct is not None else 100
+            total = scale(swapped, pct)
+            name, items = " + ".join(f.name for f in foods[:2]), [f.name for f in foods]
+        else:
+            pct = {"followed": 100, "skipped": 0}.get(d.adherence, d.eaten_pct)
+            total = scale(planned, pct)
+            name, items = pm.name, pm.items
+        out |= {"planMealId": pm.id, "slot": pm.slot, "adherence": d.adherence, "eatenPct": pct,
+                "plannedKcal": pm.kcal, "name": name, "items": items}
+    elif swapped is not None:
+        pct = d.eaten_pct if d.eaten_pct is not None else 100
+        total = scale(swapped, pct)
+        out |= {"name": d.name or " + ".join(f.name for f in foods[:2]), "items": d.items or [f.name for f in foods],
+                "eatenPct": pct}
+    else:
+        total = {"kcal": d.kcal, "protein_g": d.protein_g or 0, "carbs_g": d.carbs_g or 0, "fat_g": d.fat_g or 0}
+        out |= {"name": d.name, "items": d.items}
+    out |= {"kcal": total["kcal"], "proteinG": total["protein_g"], "carbsG": total["carbs_g"], "fatG": total["fat_g"]}
+    if d.taste_rating is not None:
+        out["tasteRating"] = d.taste_rating
+    return out
+
+
+def _store_data(db: Session, body, astronaut: AppAstronaut, log_id: str | None = None) -> dict:
+    if body.type == "meal":
+        return _meal_data(db, body, astronaut, log_id)
     data = body.data.model_dump(mode="json", by_alias=True, exclude_none=True)  # JSON column: datetimes as ISO text
     if body.type == "measurement" and body.data.metric != "blood_pressure":
         delta = logic.baseline_delta(astronaut, body.data.metric, body.data.values["value"])
@@ -154,11 +216,21 @@ def create_log(body: LogIn, astronaut: AppAstronaut = Depends(current_astronaut)
     m, day = mission_day(db)
     _check_environment(body, m)
     coins = 0 if body.type == "meditation" else logic.COINS_PER_LOG
+    data = _store_data(db, body, astronaut)
+    # Streak bonus: the first mood check-in of the day that completes 7, 14, 21... days in a row.
+    bonus = None
+    if body.type == "mood":
+        logs = views.astronaut_logs(db, astronaut.id)
+        if not any(l.type == "mood" and l.mission_day == day for l in logs):
+            run = views.streak(logs, day - 1) + 1 if day > 1 else 1
+            if run % logic.STREAK_DAYS == 0:
+                bonus = {"type": "mood_streak_7", "coins": logic.STREAK_BONUS, "streak": run}
+                coins += logic.STREAK_BONUS
     log = AppLog(
         id=new_id("log"), astronaut_id=astronaut.id, type=body.type,
         timestamp=body.timestamp or datetime.now(timezone.utc), mission_day=day,
         environment_id=body.environment_id, note=body.note, coins_earned=coins,
-        data=_store_data(body, astronaut), source="app",
+        data=data, source="app",
     )
     db.add(log)
     astronaut.avatar = {**astronaut.avatar, "coins": astronaut.avatar.get("coins", 0) + coins}
@@ -166,11 +238,13 @@ def create_log(body: LogIn, astronaut: AppAstronaut = Depends(current_astronaut)
     changed, request_id = _after_save(db, astronaut, day, log)
     db.commit()
     message = f"Log saved to your mission record · +{coins} mission coins"
+    if bonus:
+        message += f" ({bonus['streak']}-day check-in streak: +{logic.STREAK_BONUS})"
     if request_id:
         message += ". Severe injury: flagged to the ground medical team."
     return LogSaved(log=views.log_out(log), coins=astronaut.avatar["coins"], coins_earned=coins,
                     logged_today=True, alerts=[views.alert_out(a) for a in changed],
-                    support_request_id=request_id, message=message)
+                    support_request_id=request_id, bonus=bonus, message=message)
 
 
 @router.put("/logs/{log_id}", response_model=LogSaved, summary="Edit a log (same type, no extra coins)")
@@ -183,7 +257,7 @@ def update_log(log_id: str, body: LogIn, astronaut: AppAstronaut = Depends(curre
     if log.type != body.type:
         raise HTTPException(422, f"This log is of type {log.type!r}")
     _check_environment(body, m)
-    log.data, log.note, log.environment_id = _store_data(body, astronaut), body.note, body.environment_id
+    log.data, log.note, log.environment_id = _store_data(db, body, astronaut, log.id), body.note, body.environment_id
     log.updated_at = utcnow()
     db.flush()
     changed, request_id = _after_save(db, astronaut, day, log)
@@ -276,6 +350,97 @@ def update_note(note_id: int, action: Literal["read", "dismiss"],
     note.status = "read" if action == "read" else "dismissed"
     db.commit()
     return {"id": note.id, "status": note.status}
+
+
+# --- chat with Orbi (rule-based for now) -----------------------------------------------------
+
+
+def _chat_out(c: AppChatMessage) -> dict:
+    return {"id": c.id, "astronautId": c.astronaut_id, "author": c.author, "text": c.text,
+            "timestamp": views.iso(c.timestamp), "mode": c.mode,
+            "provenance": "SIMULATED_TELEMETRY" if c.source == "seed"
+            else "USER_REPORTED" if c.author == "astronaut" else "RULE_DERIVED"}
+
+
+@router.get("/orbi/messages", summary="Chat history with Orbi (journal mode only), oldest first")
+def orbi_messages(limit: int = Query(200, ge=1, le=1000), astronaut: AppAstronaut = Depends(current_astronaut),
+                  db: Session = Depends(get_db)):
+    rows = db.scalars(select(AppChatMessage).where(AppChatMessage.astronaut_id == astronaut.id)
+                      .order_by(AppChatMessage.timestamp.desc(), AppChatMessage.id.desc()).limit(limit)).all()
+    return [_chat_out(c) for c in reversed(rows)]
+
+
+@router.post("/orbi/chat", summary="Talk to Orbi. journal: saved with a journal entry; private: nothing is saved")
+def orbi_chat(body: OrbiChatIn, astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
+    """Answers come from rules (keywords plus the day's summary), labelled RULE_DERIVED.
+
+    A language model can replace the rules later behind this same route.
+    """
+    m, day = mission_day(db)
+    text = body.text.strip()
+    reply, topic = orbi.reply_to(text, astronaut.name.split()[0], evaluate(db, astronaut, day, m))
+    out = {"reply": reply, "mode": body.mode, "topic": topic, "saved": body.mode == "journal",
+           "journalEntry": None, "messages": [], "provenance": "RULE_DERIVED"}
+    if body.mode == "private":
+        return out  # nothing is written, not even the reply
+    now = utcnow()
+    mine = AppChatMessage(id=new_id("msg"), astronaut_id=astronaut.id, author="astronaut", text=text,
+                          timestamp=now, mode="journal", source="app")
+    answer = AppChatMessage(id=new_id("msg"), astronaut_id=astronaut.id, author="orbi", text=reply,
+                            timestamp=now + timedelta(milliseconds=1), mode="journal", source="rules")
+    moods = [l for l in views.astronaut_logs(db, astronaut.id) if l.type == "mood" and l.mission_day == day]
+    mood_level = max(moods, key=lambda l: l.timestamp).data["level"] if moods else orbi.MOOD_HINT.get(topic)
+    entry = AppJournalEntry(id=new_id("jrn"), astronaut_id=astronaut.id, timestamp=now,
+                            summary=orbi.journal_summary(text), mood_level=mood_level,
+                            source_message_ids=[mine.id, answer.id])
+    db.add_all([mine, answer, entry])
+    db.commit()
+    out["messages"] = [_chat_out(mine), _chat_out(answer)]
+    out["journalEntry"] = {"id": entry.id, "astronautId": entry.astronaut_id, "timestamp": views.iso(entry.timestamp),
+                           "summary": entry.summary, "moodLevel": entry.mood_level,
+                           "sourceMessageIds": entry.source_message_ids}
+    return out
+
+
+# --- uploads (voice note of the mood check-in, injury photo) ----------------------------------
+
+
+@router.post("/uploads", status_code=201, summary="Upload an audio or image file; returns its url")
+async def upload(request: Request, file: UploadFile = File(...), astronaut: AppAstronaut = Depends(current_astronaut)):
+    """Use the returned `url` in `voiceNote.url` (mood) or `photoUrl` (injury).
+
+    Accepts audio (m4a, aac, mp3, wav, webm, ogg, 3gp) and images (jpg, png, webp, heic).
+    The file gets a random name; whoever has the url can open it.
+    """
+    from app.routers.app_public import UPLOAD_TYPES
+
+    settings = get_settings()
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    ext = UPLOAD_TYPES.get(content_type)
+    if ext is None:
+        raise HTTPException(415, f"Unsupported file type {content_type or 'unknown'!r}; send audio or an image")
+    limit = settings.upload_max_mb * 1024 * 1024
+    data = await file.read(limit + 1)
+    if len(data) > limit:
+        raise HTTPException(413, f"File larger than {settings.upload_max_mb} MB")
+    if not data:
+        raise HTTPException(422, "Empty file")
+    settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    name = f"{uuid.uuid4().hex}{ext}"
+    (settings.upload_dir / name).write_bytes(data)
+    path = f"/api/v1/app/uploads/{name}"
+    return {"url": str(request.base_url).rstrip("/") + path, "path": path, "contentType": content_type,
+            "sizeBytes": len(data), "kind": content_type.split("/")[0]}
+
+
+# --- meal plan ----------------------------------------------------------------------------------
+
+
+@router.get("/meal-plan", summary="Planned meals of a day, with what was logged for each")
+def my_meal_plan(day: int | None = Query(None, ge=1, description="Mission day (default: today)"),
+                 astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
+    m, today = mission_day(db)
+    return views.meal_plan(db, astronaut, min(day or today, m.length_days))
 
 
 # --- messages with the ground team (communication delay) ----------------------------------

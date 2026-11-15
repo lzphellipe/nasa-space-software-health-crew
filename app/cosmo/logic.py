@@ -30,8 +30,11 @@ from app.cosmo.models import AppAstronaut, AppLog, AppMission
 
 LEVEL_ORDER = {"unknown": 0, "ok": 1, "warn": 2, "alert": 3}
 PENALTY = {"warn": 5, "alert": 10}
-COUNTED_TYPES = ["mood", "sleep", "radiation", "measurement", "meal", "exercise", "meditation"]  # injury not counted
-REQUIRED_FOR_SCORE = 6  # meditation (Relax) is "coming soon"
+# The six daily logs of the app. Relax/meditation ("coming soon") and injury do not count.
+COUNTED_TYPES = ["mood", "sleep", "radiation", "measurement", "meal", "exercise"]
+REQUIRED_FOR_SCORE = len(COUNTED_TYPES)
+STREAK_DAYS = 7
+STREAK_BONUS = 50  # extra coins when the mood check-in completes 7 days in a row
 COINS_PER_LOG = 10
 WINDOW = 7
 STRESS_TAGS = {"anxious", "overloaded", "stressed"}
@@ -58,6 +61,14 @@ def today(session: Session, m: AppMission | None = None) -> int:
     else:
         day = m.today
     return max(1, min(day, m.length_days))
+
+
+def status_level(score: int) -> str:
+    """The single status tag of the app: >= 70 ok, 50-69 warn, < 50 alert."""
+    return "ok" if score >= 70 else "warn" if score >= 50 else "alert"
+
+
+STATUS_LABEL = {"ok": "stable", "warn": "attention", "alert": "alert"}
 
 
 def worst(levels) -> str:
@@ -87,6 +98,7 @@ class DayEvaluation:
     areas: dict[str, str]
     score: int
     label: str
+    status_level: str = "ok"
 
 
 def baseline_delta(astronaut: AppAstronaut, metric: str, value: float) -> float | None:
@@ -103,7 +115,9 @@ def _latest_measurement(logs: list[AppLog], metric: str) -> AppLog | None:
     return max(items, key=lambda l: (l.mission_day, l.timestamp)) if items else None
 
 
-def evaluate_day(astronaut: AppAstronaut, all_logs: list[AppLog], day: int, goals: dict) -> DayEvaluation:
+def evaluate_day(astronaut: AppAstronaut, all_logs: list[AppLog], day: int, goals: dict,
+                 plan_kcal: dict[int, float] | None = None) -> DayEvaluation:
+    """`plan_kcal`: planned kcal per mission day (meal plan), to report how much of the plan was eaten."""
     logs = [l for l in all_logs if l.mission_day <= day]
     window = [l for l in logs if l.mission_day > day - WINDOW]
     window_len = min(WINDOW, day)
@@ -203,16 +217,26 @@ def evaluate_day(astronaut: AppAstronaut, all_logs: list[AppLog], day: int, goal
             kcal_by_day[l.mission_day] += l.data["kcal"]
         goal = goals.get("kcalPerDay", 2500)
         intake = statistics.fmean(kcal_by_day.values()) / goal
-        taste = statistics.fmean(l.data["tasteRating"] for l in meals)
-        repeated = Counter(l.data["name"].strip().lower() for l in meals).most_common(1)[0]
+        # Taste and name are optional (a skipped meal has neither).
+        rated = [l for l in meals if l.data.get("tasteRating")]
+        taste = statistics.fmean(l.data["tasteRating"] for l in rated) if rated else None
+        names = Counter(l.data["name"].strip().lower() for l in meals
+                        if l.data.get("name") and l.data.get("adherence") != "skipped")
+        repeated = names.most_common(1)[0] if names else (None, 0)
         # Menu fatigue: low taste ratings, made worse when the same dish keeps coming back.
-        recent_taste = [l.data["tasteRating"] for l in meals[-4:]]
-        fatigue = len(meals) >= 4 and (taste <= 2.6 or (repeated[1] >= 4 and statistics.fmean(recent_taste) <= 3))
+        recent_taste = [l.data["tasteRating"] for l in rated[-4:]]
+        fatigue = bool(len(rated) >= 4 and (taste <= 2.6 or (repeated[1] >= 4 and statistics.fmean(recent_taste) <= 3)))
         level = "alert" if intake < 0.5 else "warn" if intake < 0.65 or fatigue else "ok"
+        # Share of the meal plan eaten, over the days of the window that have meal logs.
+        planned = sum((plan_kcal or {}).get(day_, 0) for day_ in kcal_by_day)
+        plan_pct = round(sum(kcal_by_day.values()) / planned * 100) if planned else None
         d["nutrition"] = DomainResult(level, {"avgKcalPerDay": round(intake * goal), "goalKcal": goal,
-                                              "intakePct": round(intake * 100), "avgTaste": round(taste, 2),
+                                              "intakePct": round(intake * 100),
+                                              "avgTaste": round(taste, 2) if taste is not None else None,
                                               "menuFatigue": fatigue, "mostRepeatedMeal": repeated[0],
-                                              "mostRepeatedCount": repeated[1]}, [l.id for l in meals][-4:])
+                                              "mostRepeatedCount": repeated[1], "planPct": plan_pct,
+                                              "planText": f"{plan_pct}% of plan" if plan_pct is not None else None},
+                                     [l.id for l in meals][-4:])
     else:
         d["nutrition"] = DomainResult()
 
@@ -242,10 +266,10 @@ def evaluate_day(astronaut: AppAstronaut, all_logs: list[AppLog], day: int, goal
 
     done = sorted({l.type for l in logs if l.mission_day == day and l.type in COUNTED_TYPES})
     health = max(0, 100 - sum(PENALTY.get(r.level, 0) for r in d.values()))
-    adherence_score = min(1.0, len([t for t in done if t != "meditation"]) / REQUIRED_FOR_SCORE)
+    adherence_score = min(1.0, len(done) / REQUIRED_FOR_SCORE)
     score = round(0.8 * health + 20 * adherence_score)
-    label = "stable" if score >= 75 else "attention" if score >= 60 else "alert"
-    return DayEvaluation(astronaut.id, day, done, d, areas, score, label)
+    level = status_level(score)
+    return DayEvaluation(astronaut.id, day, done, d, areas, score, STATUS_LABEL[level], level)
 
 
 # --- alerts in the app's format --------------------------------------------------------
@@ -256,9 +280,11 @@ ALERT_TEXT = {
     "low_mood": lambda x: f"Mood averaged {x['avgLevel']:.1f}/5 over the last check-ins"
                           + (f" ({', '.join(x['tags'])})." if x.get("tags") else "."),
     "bone_loss": lambda x: f"Bone density {x['deltaPct']:+.1f}% vs. baseline (NASA reference: −1 to −1.5% per month).",
-    "menu_fatigue": lambda x: (f"Intake {x['intakePct']}% of the {x['goalKcal']} kcal goal; average taste "
-                               f"{x['avgTaste']:.1f}/5" + (f"; \"{x['mostRepeatedMeal']}\" {x['mostRepeatedCount']} times."
-                                                           if x["mostRepeatedCount"] >= 4 else ".")),
+    "menu_fatigue": lambda x: (f"Intake {x['intakePct']}% of the {x['goalKcal']} kcal goal"
+                               + (f" ({x['planText']})" if x.get("planText") else "")
+                               + (f"; average taste {x['avgTaste']:.1f}/5" if x.get("avgTaste") is not None else "")
+                               + (f"; \"{x['mostRepeatedMeal']}\" {x['mostRepeatedCount']} times."
+                                  if x["mostRepeatedCount"] >= 4 else ".")),
 }
 
 

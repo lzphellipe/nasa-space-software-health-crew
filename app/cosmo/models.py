@@ -140,3 +140,50 @@ class AppEnvironmentReading(Base):
     noise_db: Mapped[float] = mapped_column()
     radiation_usv_h: Mapped[float] = mapped_column()
     crew_present: Mapped[int] = mapped_column(Integer)
+
+
+class AppChatMessage(Base):
+    """Conversation with Orbi. Only "journal" mode is stored; "private" mode saves nothing."""
+
+    __tablename__ = "app_chat_messages"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # "msg-001"
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("app_astronauts.id"), index=True)
+    author: Mapped[str] = mapped_column(String(10))  # orbi | astronaut
+    text: Mapped[str] = mapped_column(Text)
+    timestamp: Mapped[datetime] = mapped_column(UTCDateTime())
+    mode: Mapped[str] = mapped_column(String(10), default="journal")
+    source: Mapped[str] = mapped_column(String(10), default="app")  # seed | app | rules
+
+
+class AppFood(Base):
+    """Station food catalog, used for meal swaps and to build meal plans. Values per serving."""
+
+    __tablename__ = "app_foods"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # "food-rice"
+    name: Mapped[str] = mapped_column(String(120))
+    serving_g: Mapped[float] = mapped_column()
+    kcal: Mapped[float] = mapped_column()
+    protein_g: Mapped[float] = mapped_column()
+    carbs_g: Mapped[float] = mapped_column()
+    fat_g: Mapped[float] = mapped_column()
+
+
+class AppPlanMeal(Base):
+    """One planned meal of one astronaut on one mission day, set by the medical team."""
+
+    __tablename__ = "app_meal_plan"
+    __table_args__ = (Index("ix_app_meal_plan_astronaut_day", "astronaut_id", "mission_day"),)
+
+    id: Mapped[str] = mapped_column(String(60), primary_key=True)  # "pm-ast-01-d12-lunch"
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("app_astronauts.id"))
+    mission_day: Mapped[int] = mapped_column(Integer)
+    slot: Mapped[str] = mapped_column(String(12))  # breakfast | lunch | dinner | snack
+    time: Mapped[str] = mapped_column(String(5))  # "08:00"
+    name: Mapped[str] = mapped_column(String(160))
+    items: Mapped[list] = mapped_column(JSON, default=list)
+    kcal: Mapped[float] = mapped_column()
+    protein_g: Mapped[float] = mapped_column()
+    carbs_g: Mapped[float] = mapped_column()
+    fat_g: Mapped[float] = mapped_column()
