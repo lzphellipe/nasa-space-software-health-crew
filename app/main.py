@@ -15,7 +15,7 @@ from app.config import get_settings
 from app.routers import analog, auth, care, catalog, crew, dashboard, ingest, knowledge, me, missions
 from app.routers import app_ground, app_me, app_public
 from app.routers import provenance as provenance_router
-from app.services.ingest import database_is_empty, run_ingestion
+from app.services.ingest import database_is_empty, missing_datasets, run_ingestion
 from app.cosmo.seed import ensure_extras as ensure_cosmo_extras
 from app.cosmo.seed import seed_if_empty as seed_cosmo
 from app.services.knowledge import load_bundled
@@ -33,8 +33,10 @@ async def lifespan(_: FastAPI):
     db.init_db()
     if settings.ingest_on_startup:
         with db.SessionLocal() as session:
-            if database_is_empty(session):
-                log.info("Empty database: ingesting OSDR data (source=%s)", settings.ingest_source)
+            missing = missing_datasets(session)
+            if database_is_empty(session) or missing:
+                # Unchanged files are skipped by their SHA-256, so this only adds the new datasets.
+                log.info("Ingesting OSDR data (source=%s, missing: %s)", settings.ingest_source, missing or "all")
                 run = run_ingestion(session, settings)
                 log.info("Ingestion %s; warnings: %s", run.status, run.warnings or "none")
     if settings.synthetic_on_startup:

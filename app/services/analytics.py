@@ -22,7 +22,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import BaselineStat, Measurement, Timepoint
+from app.models import Analyte, BaselineStat, Measurement, Timepoint
+from app.osdr.datasets import LOG_SCALE_PANELS
+
+# Log2 panels (Alamar NPQ): 'watch' needs at least a 2-fold change (1 NPQ) and |z| >= the usual cut-off.
+LOG2_WATCH_DELTA = 1.0
 
 STATUS_ORDER = {"no_data": 0, "normal": 1, "watch": 2, "out_of_range": 3}
 
@@ -50,6 +54,7 @@ def worst_status(statuses) -> str:
 def recompute_derived(session: Session, settings: Settings) -> int:
     """Recompute baselines and per-measurement deviation for the whole database."""
     phases = dict(session.execute(select(Timepoint.code, Timepoint.phase)).all())
+    log_scale = set(session.scalars(select(Analyte.code).where(Analyte.panel.in_(LOG_SCALE_PANELS))))
     measurements = session.scalars(select(Measurement)).all()
 
     groups: dict[tuple[str, str], list[Measurement]] = defaultdict(list)
@@ -84,11 +89,16 @@ def recompute_derived(session: Session, settings: Settings) -> int:
         for m in items:
             m.flag = reference_flag(m.value, m.ref_min, m.ref_max)
             m.baseline_mean = mean
+            is_log = analyte_code in log_scale
             if m.value is None or mean is None:
                 m.delta_abs = m.delta_pct = m.z_score = None
             else:
                 m.delta_abs = m.value - mean
-                m.delta_pct = (m.delta_abs / mean * 100.0) if mean != 0 else None
+                # On a log2 scale a percent of the log value means nothing; report the fold change instead.
+                if is_log:
+                    m.delta_pct = (2 ** m.delta_abs - 1) * 100.0
+                else:
+                    m.delta_pct = (m.delta_abs / mean * 100.0) if mean != 0 else None
                 m.z_score = m.delta_abs / sd_eff if sd_eff else None
 
             if m.value is None:
@@ -99,7 +109,7 @@ def recompute_derived(session: Session, settings: Settings) -> int:
                 phases.get(m.timepoint_code) != "preflight"
                 and m.delta_pct is not None
                 and m.z_score is not None
-                and abs(m.delta_pct) >= settings.watch_pct_change
+                and (abs(m.delta_abs) >= LOG2_WATCH_DELTA if is_log else abs(m.delta_pct) >= settings.watch_pct_change)
                 and abs(m.z_score) >= settings.watch_z_score
             ):
                 m.status = "watch"

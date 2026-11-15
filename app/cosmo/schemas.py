@@ -374,4 +374,38 @@ class PlanBulkIn(APIModel):
         return self
 
 
+class ReadingIn(APIModel):
+    metric: str = Field(max_length=30, description="heart_rate, spo2, body_temperature, sleep_session, blood_pressure, "
+                                                    "radiation_dose, eva_co2... (GET /app/telemetry/metrics)")
+    measured_at: datetime
+    value: float | None = Field(None, description="Scalar metrics")
+    values: dict[str, Any] | None = Field(None, description="sleep_session: {bedtime, wakeTime, avgHr?, respRate?, "
+                                                             "movementEvents?, awakenings?}; blood_pressure: "
+                                                             "{systolic, diastolic, pulse?}; optional context")
+
+
+class TelemetryIn(APIModel):
+    source: Literal["health_connect", "healthkit", "ble", "eva_suit"]
+    device: Literal["watch", "wrist_band", "bp_cuff", "dosimeter", "eva_suit", "thermometer", "pulse_oximeter"]
+    readings: list[ReadingIn] = Field(min_length=1, max_length=2000)
+
+
+class SimulateIn(APIModel):
+    hours: int = Field(24, ge=1, le=48)
+    eva: bool = Field(False, description="Add a 6-hour EVA with suit telemetry")
+    anomaly: Literal["none", "low_spo2", "fever", "high_heart_rate", "eva_co2", "eva_pressure"] = "none"
+
+
+class ConfirmIn(APIModel):
+    correction: dict[str, Any] | None = Field(None, description="Fields of the proposed log to change, e.g. {quality: 2}")
+    note: str | None = Field(None, max_length=500)
+
+
+class AnswerIn(APIModel):
+    answer: Literal["ok", "not_ok"]
+    symptoms: list[Literal["shortness_of_breath", "chest_pain", "headache", "dizziness", "nausea", "fever",
+                           "fatigue", "palpitations", "pain", "other"]] = Field(default_factory=list, max_length=10)
+    note: str | None = Field(None, max_length=500)
+
+
 LogSaved.model_rebuild()

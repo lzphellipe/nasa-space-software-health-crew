@@ -28,8 +28,16 @@ class DatasetSpec:
     specimen: str
     file_name: str
     # "range": <analyte>_value_<unit>, <analyte>_range_min_<unit>, <analyte>_range_max_<unit>
-    # "concentration": <analyte>_concentration_<unit>, <analyte>_percent
+    # "concentration": <analyte>_concentration_<unit>, <analyte>_percent[_normalized_value]
     layout: Literal["range", "concentration"]
+    # Research panels: hundreds of proteins without clinical ranges. They are stored and queryable
+    # (by panel or analyte, catalog, CSV), but kept out of crew summaries, alerts and overviews.
+    research: bool = False
+    # Prefix for analyte codes, when a panel measures proteins another panel also measures.
+    code_prefix: str = ""
+    default_category: str = "other"
+    # Values on a log2 scale (Alamar NPQ): change is judged in absolute units, not percent.
+    log_scale: bool = False
 
 
 OSD_569 = StudySpec(
@@ -79,6 +87,32 @@ DATASETS = [
         file_name="LSDS-8_Multiplex_serum_cardiovascular_EvePanel_TRANSFORMED.csv",
         layout="concentration",
     ),
+    DatasetSpec(
+        key="immune",
+        study=OSD_575,
+        panel="immune",
+        panel_name="Multiplex Serum Immune Cytokine Panel (Eve Technologies HD71)",
+        specimen="serum",
+        file_name="LSDS-8_Multiplex_serum_immune_EvePanel_TRANSFORMED.csv",
+        layout="concentration",
+        research=True,
+        default_category="cytokines",
+    ),
+    DatasetSpec(
+        key="alamar",
+        study=OSD_575,
+        panel="alamar",
+        panel_name="Multiplex Serum Inflammation Panel (Alamar NULISAseq, NPQ)",
+        specimen="serum",
+        file_name="LSDS-8_Multiplex_serum.immune.AlamarPanel_TRANSFORMED.csv",
+        layout="concentration",
+        research=True,
+        code_prefix="alamar_",
+        default_category="cytokines",
+        log_scale=True,
+    ),
 ]
 
 DATASETS_BY_KEY = {d.key: d for d in DATASETS}
+RESEARCH_PANELS = frozenset(d.panel for d in DATASETS if d.research)
+LOG_SCALE_PANELS = frozenset(d.panel for d in DATASETS if d.log_scale)

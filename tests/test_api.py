@@ -83,4 +83,5 @@ def test_reingest_is_idempotent(client):
 def test_export_csv(client):
     response = client.get(f"{API}/export/measurements.csv")
     assert response.headers["content-type"].startswith("text/csv")
-    assert len(response.text.strip().splitlines()) == 1345
+    # 1,344 clinical + 1,988 Eve immune (28 x 71) + 5,481 Alamar (27 x 203) measurements, plus the header
+    assert len(response.text.strip().splitlines()) == 8814

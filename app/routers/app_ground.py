@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.deps import require_care_team
-from app.cosmo import logic, nutrition, views
+from app.cosmo import logic, nutrition, telemetry, views
 from app.cosmo.models import AppAlert, AppAstronaut, AppEnvironmentReading, AppGroundMessage, AppLog
 from app.cosmo.schemas import (
     AlertOut,
@@ -64,6 +64,9 @@ def crew(db: Session = Depends(get_db)):
             "overallScore": ev.score, "statusLevel": ev.status_level, "statusLabel": ev.label,
             "logsToday": len(ev.logs_done), "logsTotal": len(logic.COUNTED_TYPES),
             "nutritionPlanPct": ev.domains["nutrition"].detail.get("planPct"),
+            "lastSyncAt": telemetry._iso(telemetry.last_sync(db, a.id)),
+            "pendingConfirmations": telemetry.pending_count(db, a.id),
+            "vitals": telemetry.latest_vitals(db, a.id),
             "areas": ev.areas,
             "mood": {"level": moods[-1].data["level"], "label": moods[-1].data["label"],
                      "missionDay": moods[-1].mission_day} if moods else None,
@@ -216,6 +219,29 @@ def post_meal_plan(astronaut_id: str, body: PlanBulkIn, db: Session = Depends(ge
     db.commit()
     days = sorted(set(days))
     return {"astronautId": a.id, "days": days, "count": len(days), "seeded": body.seed}
+
+
+@router.get("/astronauts/{astronaut_id}/telemetry", summary="Device readings of one astronaut, with a summary per metric")
+def astronaut_telemetry(astronaut_id: str, metric: str | None = None, hours: int = Query(24, ge=1, le=24 * 30),
+                        limit: int = Query(500, ge=1, le=5000), db: Session = Depends(get_db)):
+    from app.routers.app_me import telemetry_view
+
+    a = _astronaut(db, astronaut_id)
+    return telemetry_view(db, a.id, metric, hours, limit) | {"sync": telemetry.sync_status(db, a)}
+
+
+@router.get("/confirmations", summary="Orbi confirmations of the crew: pending, answered checks, confirmed readings")
+def crew_confirmations(astronaut_id: str | None = Query(None, alias="astronautId"),
+                       status: str = Query("all", description="pending | answered | confirmed | corrected | dismissed | all"),
+                       db: Session = Depends(get_db)):
+    from app.cosmo.models import AppConfirmation
+
+    stmt = select(AppConfirmation)
+    if astronaut_id:
+        stmt = stmt.where(AppConfirmation.astronaut_id == astronaut_id)
+    if status != "all":
+        stmt = stmt.where(AppConfirmation.status == status)
+    return [telemetry.confirmation_out(c) for c in db.scalars(stmt.order_by(AppConfirmation.created_at.desc()).limit(500))]
 
 
 @router.get("/messages", response_model=list[GroundMessageOut], summary="Message threads (urgent and unread first)")
