@@ -8,14 +8,15 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import Field, TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.deps import get_current_user
 from app.config import get_settings
-from app.cosmo import logic, nutrition, orbi, telemetry, views
+from app.cosmo import logic, nutrition, offline, orbi, telemetry, views
 from app.cosmo.models import (
     AppAlert,
     AppAstronaut,
@@ -220,14 +221,33 @@ def _after_save(db: Session, astronaut: AppAstronaut, day: int, log: AppLog) -> 
     return changed, request_id
 
 
+IDEMPOTENCY_KEY = Header(None, alias="Idempotency-Key", min_length=8, max_length=64,
+                         description="Id made by the app for this request. Sending it again returns the first "
+                                     "answer instead of saving twice (safe retry after a dropped connection).")
+
+
 @router.post("/logs", response_model=LogSaved, status_code=201, summary="Save a log (+10 coins)")
-def create_log(body: LogIn, astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
-    return save_new_log(db, astronaut, body)
+def create_log(body: LogIn, idempotency_key: str | None = IDEMPOTENCY_KEY,
+               astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
+    if idempotency_key is None:
+        return save_new_log(db, astronaut, body)
+    # The stored answer is already in the response format: send it as it is.
+    return JSONResponse(offline.once(db, astronaut, idempotency_key, "log.create", body.timestamp,
+                                     lambda: _saved_json(save_new_log(db, astronaut, body))), status_code=201)
 
 
-def save_new_log(db: Session, astronaut: AppAstronaut, body, source: str = "app") -> LogSaved:
-    """Save a new log: coins, streak bonus, alerts and Orbi note. `source` is app, device or simulator."""
-    m, day = mission_day(db)
+def _saved_json(saved: LogSaved) -> tuple[str, dict]:
+    return saved.log.id, saved.model_dump(mode="json", by_alias=True)
+
+
+def save_new_log(db: Session, astronaut: AppAstronaut, body, source: str = "app", log_day: int | None = None) -> LogSaved:
+    """Save a new log: coins, streak bonus, alerts and Orbi note. `source` is app, device or simulator.
+
+    `log_day` is the mission day the log belongs to when it was recorded offline on an earlier
+    day; alerts are always evaluated for today (their 7-day window covers the late log).
+    """
+    m, today = mission_day(db)
+    day = today if log_day is None else log_day
     _check_environment(body, m)
     coins = 0 if body.type == "meditation" else logic.COINS_PER_LOG
     data = _store_data(db, body, astronaut)
@@ -249,7 +269,7 @@ def save_new_log(db: Session, astronaut: AppAstronaut, body, source: str = "app"
     db.add(log)
     astronaut.avatar = {**astronaut.avatar, "coins": astronaut.avatar.get("coins", 0) + coins}
     db.flush()
-    changed, request_id = _after_save(db, astronaut, day, log)
+    changed, request_id = _after_save(db, astronaut, today, log)
     db.commit()
     message = f"Log saved to your mission record · +{coins} mission coins"
     if bonus:
@@ -257,7 +277,7 @@ def save_new_log(db: Session, astronaut: AppAstronaut, body, source: str = "app"
     if request_id:
         message += ". Severe injury: flagged to the ground medical team."
     return LogSaved(log=views.log_out(log), coins=astronaut.avatar["coins"], coins_earned=coins,
-                    logged_today=True, alerts=[views.alert_out(a) for a in changed],
+                    logged_today=day == today, alerts=[views.alert_out(a) for a in changed],
                     support_request_id=request_id, bonus=bonus, message=message)
 
 
@@ -642,7 +662,18 @@ def ground_thread(astronaut: AppAstronaut = Depends(current_astronaut), db: Sess
 
 
 @router.post("/ground-messages", response_model=GroundMessageOut, status_code=201, summary="Send a message to the ground")
-def send_ground(body: GroundMessageIn, astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
+def send_ground(body: GroundMessageIn, idempotency_key: str | None = IDEMPOTENCY_KEY,
+                astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
+    if idempotency_key is None:
+        return post_ground_message(db, astronaut, body)
+
+    def run():
+        out = post_ground_message(db, astronaut, body)
+        return out.id, out.model_dump(mode="json", by_alias=True)
+    return JSONResponse(offline.once(db, astronaut, idempotency_key, "message.send", None, run), status_code=201)
+
+
+def post_ground_message(db: Session, astronaut: AppAstronaut, body: GroundMessageIn) -> GroundMessageOut:
     m, _ = mission_day(db)
     for log_id in body.attachments:
         log = db.get(AppLog, log_id)

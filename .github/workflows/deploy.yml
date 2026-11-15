@@ -1,0 +1,77 @@
+name: deploy
+
+# Every push to main (a merged pull request) is tested and then deployed to Azure App Service.
+# Needs one repository secret: AZURE_WEBAPP_PUBLISH_PROFILE (see "Deploy" in the README).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-azure
+  cancel-in-progress: false
+
+env:
+  AZURE_WEBAPP_NAME: crew-health-api-univesp
+  APP_URL: https://crew-health-api-univesp.azurewebsites.net
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  deploy:
+    needs: tests
+    runs-on: ubuntu-latest
+    environment:
+      name: azure
+      url: ${{ env.APP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the deploy secret
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        run: |
+          if [ -z "$PUBLISH_PROFILE" ]; then
+            echo "::error::Secret AZURE_WEBAPP_PUBLISH_PROFILE is missing. Azure portal > App Service > Download publish profile, then GitHub > Settings > Secrets and variables > Actions > New repository secret."
+            exit 1
+          fi
+
+      # Same package as deploy/azure.sh: the code and requirements.txt; Azure installs the dependencies (Oryx build).
+      - name: Build the package
+        run: zip -qr release.zip app requirements.txt -x '*/__pycache__/*'
+
+      - name: Deploy to Azure App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: release.zip
+
+      # The first start after a deploy loads the data and can take several minutes.
+      - name: Wait for the API
+        run: |
+          for i in $(seq 1 60); do
+            code=$(curl -s -m 20 -o /dev/null -w '%{http_code}' "$APP_URL/health" || true)
+            echo "attempt $i: /health $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 20
+          done
+          echo "::error::The API did not answer 200 on /health within 20 minutes"
+          exit 1
+
+      - name: Check the deployed routes
+        run: |
+          curl -sf -m 60 "$APP_URL/openapi.json" -o openapi.json
+          python3 - <<'PY'
+          import json, sys
+          paths = json.load(open("openapi.json"))["paths"]
+          needed = ["/api/v1/app/me/sync", "/api/v1/app/me/offline-bundle", "/api/v1/app/telemetry/metrics"]
+          missing = [p for p in needed if p not in paths]
+          print(f"{len(paths)} routes; missing: {missing or 'none'}")
+          sys.exit(1 if missing else 0)
+          PY
