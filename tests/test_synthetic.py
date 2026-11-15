@@ -85,6 +85,31 @@ def test_api_today_reports_latest_sparse_values(client):
     assert temp["status"] == "out_of_range"
 
 
+def test_api_today_also_keyed_by_metric(client):
+    """The CosmoMedic app reads `values.<metric>.value/unit/status`."""
+    day = client.get(f"{API}/astronauts/A002/today", params={"day": 49}).json()
+    assert set(day["values"]) == {m["metric"] for m in day["metrics"]}
+    temp = day["values"]["body_temperature"]
+    assert temp["unit"] == "°C" and temp["status"] == "out_of_range" and temp["value"] >= 38
+    assert day["summary"].startswith("BP ") and "°C" in day["summary"]
+
+
+def test_api_daily_records_lead_with_day_status_and_summary(client):
+    records = client.get(f"{API}/astronauts/A004/daily", params={"fromDay": 174, "toDay": 180}).json()
+    assert len(records) == 7
+    assert list(records[0])[:3] == ["missionDay", "status", "summary"]
+    assert "sleep" in records[0]["summary"] and records[0]["values"]["sleep_hours"] is not None
+
+
+def test_api_baseline_is_an_object(client):
+    b = client.get(f"{API}/astronauts/A001/baseline").json()
+    assert (b["astronautId"], b["missionId"], b["fromDay"], b["toDay"]) == ("A001", "SYN-LDM-01", -30, -1)
+    assert b["provenance"] == "SIMULATED_TELEMETRY"
+    sbp = next(m for m in b["metrics"] if m["metric"] == "systolic_bp")
+    assert b["values"]["systolic_bp"] == sbp["mean"] and sbp["n"] == 30
+    assert b["summary"].startswith("BP ")
+
+
 def test_api_series_events_and_export(client):
     series = client.get(f"{API}/metrics/systolic_bp/series", params={"fromDay": 0, "toDay": 29}).json()
     assert len(series["series"]) == 4 and len(series["crewMean"]) == 30

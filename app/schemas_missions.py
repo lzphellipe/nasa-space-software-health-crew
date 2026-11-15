@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from app.provenance import DERIVED, SIMULATED
+from pydantic import Field, field_validator
+
 from app.schemas import APIModel, StatusCounts
 
 
@@ -43,14 +45,16 @@ class AstronautOut(APIModel):
 
 
 class DailyRecordOut(APIModel):
-    astronaut_id: str
-    mission_id: str
+    # Day, status and the one-line summary come first so generic list views show them.
     mission_day: int
+    status: str
+    summary: str = Field(description="The day's vitals in one line, e.g. 'BP 118/76 mmHg · HR 62 bpm · sleep 6.1 h · mood 3/5'")
     date: date
     phase: str
+    astronaut_id: str
+    mission_id: str
     values: dict[str, float | None]
     metric_status: dict[str, str]
-    status: str
     provenance: str = SIMULATED
 
 
@@ -61,6 +65,11 @@ class BaselineOut(APIModel):
     mean: float | None
     sd: float | None
     sd_effective: float | None
+
+    @field_validator("mean", "sd", "sd_effective")
+    @classmethod
+    def _round(cls, v: float | None) -> float | None:
+        return None if v is None else round(v, 3)
 
 
 class EpisodeOut(APIModel):
@@ -89,6 +98,11 @@ class MetricComparison(APIModel):
     z_score: float | None
     last_measured_day: int | None
 
+    @field_validator("baseline_mean", "delta_pct", "z_score")
+    @classmethod
+    def _round(cls, v: float | None) -> float | None:
+        return None if v is None else round(v, 2)
+
 
 class AstronautDay(APIModel):
     astronaut: AstronautOut
@@ -96,8 +110,26 @@ class AstronautDay(APIModel):
     date: date
     phase: str
     status: str
+    summary: str
     metrics: list[MetricComparison]
+    values: dict[str, MetricComparison] = Field(description="The same comparisons keyed by metric code")
     active_episodes: list[EpisodeOut]
+    provenance: str = SIMULATED
+
+
+class BaselineSummary(APIModel):
+    astronaut_id: str
+    mission_id: str
+    from_day: int
+    to_day: int
+    summary: str
+    values: dict[str, float | None] = Field(description="Baseline mean keyed by metric code (3 decimals)")
+
+    @field_validator("values")
+    @classmethod
+    def _round_values(cls, v: dict[str, float | None]) -> dict[str, float | None]:
+        return {k: None if x is None else round(x, 3) for k, x in v.items()}
+    metrics: list[BaselineOut]
     provenance: str = SIMULATED
 
 
