@@ -45,7 +45,7 @@ def overview(timepoint: str | None = Query(None, description="Timepoint for the 
     last = db.scalars(select(IngestRun).order_by(IngestRun.id.desc()).limit(1)).first()
     return Overview(
         mission=MISSION,
-        studies=[StudyOut.model_validate(s) for s in db.scalars(select(Study).order_by(Study.id))],
+        studies=[StudyOut.model_validate(s) for s in db.scalars(select(Study).where(Study.id.like("OSD-%")).order_by(Study.id))],
         crew_count=len(crew),
         sample_count=db.scalar(select(func.count()).select_from(Sample)) or 0,
         measurement_count=q.measurement_count(db),

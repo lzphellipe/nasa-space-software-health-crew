@@ -1,0 +1,30 @@
+[
+  {
+    "astronaut_id": "A002",
+    "kind": "respiratory_infection",
+    "start_day": 47,
+    "end_day": 53,
+    "description": "Upper respiratory infection: fever, higher resting HR, more white cells, poor sleep and appetite."
+  },
+  {
+    "astronaut_id": "A003",
+    "kind": "hypertension_trend",
+    "start_day": 60,
+    "end_day": 180,
+    "description": "Progressive rise in blood pressure over the second half of the mission."
+  },
+  {
+    "astronaut_id": "A004",
+    "kind": "sleep_disruption",
+    "start_day": 100,
+    "end_day": 128,
+    "description": "Circadian misalignment during a heavy work period: short sleep, low mood, slightly higher HR and BP."
+  },
+  {
+    "astronaut_id": "A001",
+    "kind": "exercise_countermeasure_interruption",
+    "start_day": 120,
+    "end_day": 150,
+    "description": "Treadmill and resistance device unavailable: faster bone loss, higher fasting glucose and resting HR."
+  }
+]
