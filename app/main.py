@@ -1,6 +1,9 @@
 """Crew Health API: NASA OSDR blood panels from the Inspiration4 crew, cleaned and served."""
 
 from __future__ import annotations
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import asyncio
 import logging
@@ -13,7 +16,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from app import db, provenance
 from app.config import get_settings
 from app.routers import analog, auth, care, catalog, crew, dashboard, ingest, knowledge, me, missions
-from app.routers import app_ground, app_me, app_public
+from app.routers import app_ground, app_me, app_public, orbi
 from app.routers import provenance as provenance_router
 from app.services.ingest import database_is_empty, run_ingestion
 from app.cosmo.seed import seed_if_empty as seed_cosmo
@@ -107,7 +110,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 for router in (
     auth.router, me.router, care.router, crew.router, dashboard.router, missions.router,
     analog.router, knowledge.router, catalog.router, ingest.router, provenance_router.router,
-    app_public.router, app_me.router, app_ground.router,
+    app_public.router, app_me.router, app_ground.router, orbi.router,
 ):
     app.include_router(router)
 
