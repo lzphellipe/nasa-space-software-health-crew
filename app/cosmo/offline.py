@@ -39,7 +39,7 @@ from app.cosmo.service import astronaut_logs, evaluate
 from app.models import utcnow
 
 OP_TYPES = ["log.create", "log.update", "telemetry", "confirmation.confirm", "confirmation.answer",
-            "confirmation.dismiss", "message.send", "message.read"]
+            "confirmation.dismiss", "message.send", "message.read", "chat.save"]
 MAX_OPS = 500
 BUNDLE_LOG_DAYS = 14
 BUNDLE_PLAN_DAYS = 3

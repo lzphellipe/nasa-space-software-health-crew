@@ -95,6 +95,7 @@ POST /api/v1/app/auth/login
 | Device sync (wearable, cuff, dosimeter, EVA suit) | `POST /app/me/telemetry` · `POST /app/me/telemetry/simulate` · `GET /app/me/telemetry` · `GET /app/me/devices/status` · `GET /app/telemetry/metrics` |
 | Orbi confirmations (confirm a reading, quick checks) | `GET /app/me/confirmations` · `POST /app/me/confirmations/{id}/confirm\|answer\|dismiss` |
 | Offline: local copy, queue upload, changes | `GET /app/me/offline-bundle` · `POST /app/me/sync` · `GET /app/me/changes?since=` · `GET /app/me/sync/ops` |
+| Whole local database in the frontend format (mock-db.json shape) | `GET /app/snapshot` |
 | Uploads (voice note, injury photo) | `POST /app/me/uploads` · `GET /app/uploads/{name}` |
 | Meal plan, food catalog | `GET /app/me/meal-plan?day=` · `GET /app/foods?q=` |
 | Avatar, shop | `GET`/`PUT /app/me/avatar` · `POST /app/me/avatar/purchase` · `POST /app/me/avatar/equip` · `GET /app/shop` |
@@ -174,7 +175,7 @@ Far from Earth the link has a delay (`commDelaySec` of the mission) and drops. T
 //                "pendingConfirmationIds": [ … ], "groundMessages": [ … ], "home": { … }}}
 ```
 
-- Types: `log.create`, `log.update`, `telemetry`, `confirmation.confirm`, `confirmation.answer`, `confirmation.dismiss`, `message.send`, `message.read`. `payload` is the body of the matching online route, and the same rules run (coins, alerts, Orbi notes, support requests). Up to 500 operations per batch, applied in the order sent.
+- Types: `log.create`, `log.update`, `telemetry`, `confirmation.confirm`, `confirmation.answer`, `confirmation.dismiss`, `message.send`, `message.read`, and `chat.save` (a journal-mode exchange with Orbi answered on the device: `{text, reply, summary?, moodLevel?}`; saves both messages and the journal entry). `payload` is the body of the matching online route, and the same rules run (coins, alerts, Orbi notes, support requests). Up to 500 operations per batch, applied in the order sent.
 - **Each `opId` is applied at most once.** If the answer is lost, send the same batch again: operations already received come back with `duplicate: true` and their first result. Nothing is saved twice and coins are not given twice.
 - `status` of each result: `applied`; `rejected` (the server refused it, `error` says why: take it out of the queue and show it); `conflict` (`log.update` with `baseUpdatedAt` older than the server copy, which comes in `result`; the app decides what to keep and sends a new operation). A 5xx or a network error means nothing is known: send again.
 - `targetId: "op:<opId>"` points to something created earlier in the queue, which has no server id yet: a log (to edit it or attach it to a message), or a telemetry operation (to answer the question the app asked on the device; `payload.metric` picks the confirmation).
@@ -182,6 +183,8 @@ Far from Earth the link has a delay (`commDelaySec` of the mission) and drops. T
 - `changes` in the answer is what changed after `since`, including what this batch created. `GET /app/me/changes?since=` returns the same with no upload. Ground messages only appear once they arrive (communication delay).
 - Single requests can be retried safely too: `POST /app/me/logs` and `POST /app/me/ground-messages` accept the header `Idempotency-Key: <uuid>`.
 - Online only: chat with Orbi through the server (use the bundled replies), uploads, shop purchases and meal-plan edits by the ground team.
+
+**Snapshot for the CosmoMedic app.** The frontend keeps an in-memory database with the shape of its `src/mocks/mock-db.json`. `GET /app/snapshot` returns that same shape with live data (`mission`, `astronauts`, `logs`, `daily_summaries`, `environment_readings`, `ai_chat`, `ground_messages`, `shop`, `calendar`, plus `role` and `leaderboard`), so the app replaces the mock at sign-in and after each `/sync`, with no change to the screens. An astronaut gets their own data and only the name and avatar of crewmates; the ground team gets the whole crew, without the chats with Orbi.
 
 **3. Ground view.** Logs carry `timestamp` (when it happened) and `receivedAt` (when the server got it). `GET /app/ground/crew` adds `link` to each row: `status` (`online`: contact in the last 15 minutes; `delayed`: up to 12 hours; `offline`: longer; `unknown`: never), `lastContactAt`, `lastDeviceSyncAt`, `minutesSinceContact`, `queuedOnDevice` and `lastBatch` (how many operations and the largest delay). `GET /app/ground/astronauts/{id}/sync` lists the operations received, each with `lagSec`, the time between the astronaut doing it and the server receiving it.
 

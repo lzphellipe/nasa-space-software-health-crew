@@ -159,6 +159,7 @@ ROUTES: list[tuple[str, list[str]]] = [
     ("/api/v1/app/foods", [SIMULATED]),
     ("/api/v1/app/me/meal-plan", [SIMULATED, USER]),
     ("/api/v1/app/me/logs", [USER, SIMULATED, DERIVED]),
+    ("/api/v1/app/snapshot", [USER, DEVICE, SIMULATED, DERIVED]),
     ("/api/v1/app/me/sync", [USER, DEVICE, SIMULATED, DERIVED]),
     ("/api/v1/app/me/changes", [USER, DEVICE, SIMULATED, DERIVED]),
     ("/api/v1/app/me/offline-bundle", [USER, DEVICE, SIMULATED, DERIVED]),
