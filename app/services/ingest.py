@@ -26,7 +26,7 @@ from app.models import (
     Timepoint,
     utcnow,
 )
-from app.osdr.analytes import MULTIPLEX_NOTE, describe
+from app.osdr.analytes import MULTIPLEX_NOTE, NPQ_NOTE, describe
 from app.osdr.client import OSDRClient, OSDRError
 from app.osdr.datasets import DATASETS, MISSION, STUDIES, DatasetSpec
 from app.osdr.parser import parse_csv, parse_timepoint
@@ -113,7 +113,8 @@ def _ensure_timepoint(session: Session, code: str, settings: Settings) -> None:
 def _ensure_analyte(
     session: Session, spec: DatasetSpec, code: str, unit_slug: str | None, has_range: bool
 ) -> None:
-    info, unit = describe(code, unit_slug)
+    info, unit = describe(code.removeprefix(spec.code_prefix), unit_slug, spec.default_category,
+                          protein=spec.research)
     analyte = session.get(Analyte, code) or Analyte(code=code)
     analyte.panel = spec.panel
     analyte.panel_name = spec.panel_name
@@ -122,7 +123,7 @@ def _ensure_analyte(
     analyte.unit = unit
     analyte.unit_raw = unit_slug
     analyte.description = info.description
-    notes = [n for n in (info.unit_note, None if has_range else MULTIPLEX_NOTE) if n]
+    notes = [n for n in (info.unit_note, None if has_range else MULTIPLEX_NOTE, NPQ_NOTE if spec.log_scale else None) if n]
     analyte.unit_note = " ".join(notes) or None
     analyte.has_reference_range = has_range
     session.add(analyte)
@@ -179,7 +180,7 @@ def ingest_dataset(
         for code in parsed.analytes
     }
     for code, unit_slug in parsed.analytes.items():
-        _ensure_analyte(session, spec, code, unit_slug, has_range[code])
+        _ensure_analyte(session, spec, spec.code_prefix + code, unit_slug, has_range[code])
 
     sample_ids: dict[str, int] = {}
     for key in parsed.samples:
@@ -203,7 +204,7 @@ def ingest_dataset(
             sample_id=sample_ids[m.sample.sample_name],
             crew_id=m.sample.crew_id,
             timepoint_code=m.sample.timepoint,
-            analyte_code=m.analyte_code,
+            analyte_code=spec.code_prefix + m.analyte_code,
             value=m.value,
             ref_min=m.ref_min,
             ref_max=m.ref_max,
@@ -271,3 +272,9 @@ def run_ingestion(
 
 def database_is_empty(session: Session) -> bool:
     return (session.scalar(select(func.count()).select_from(Measurement)) or 0) == 0
+
+
+def missing_datasets(session: Session) -> list[str]:
+    """Datasets declared in app/osdr/datasets.py that were never ingested (e.g. added in a new release)."""
+    done = set(session.scalars(select(SourceFile.dataset_key)))
+    return [d.key for d in DATASETS if d.key not in done]

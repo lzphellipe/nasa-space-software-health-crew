@@ -64,6 +64,15 @@ def crew_login(body: CrewLoginIn, db: Session = Depends(get_db)):
             "next": "/ground" if ground else "/home" if astronaut.onboarding_done else "/onboarding"}
 
 
+@router.get("/telemetry/metrics", summary="Device metrics the API accepts, with units and quick-check thresholds")
+def telemetry_metrics():
+    from app.cosmo import telemetry
+
+    return [{"metric": m.code, "label": m.label, "unit": m.unit, "min": m.lo, "max": m.hi, "becomesLog": m.log_type,
+             "eva": m.eva, "quickCheck": telemetry.CHECKS[m.code][1].split(" at ")[0].replace("{v:.0f}", "…")
+             .replace("{v:.1f}", "…").replace("{v:g}", "…") if m.code in telemetry.CHECKS else None} for m in telemetry.METRICS.values()]
+
+
 @router.get("/foods", summary="Station food catalog (per serving), used for meal swaps")
 def foods(q: str | None = Query(None, max_length=60, description="Text in the food name"),
           db: Session = Depends(get_db)):

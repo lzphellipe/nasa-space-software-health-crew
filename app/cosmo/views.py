@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.cosmo import logic
 from app.cosmo.models import AppAlert, AppAstronaut, AppGroundMessage, AppJournalEntry, AppLog, AppMission, AppShopItem
 from app.cosmo.schemas import AlertOut, DailySummaryOut, GroundMessageOut, LogOut
-from app.cosmo import nutrition
+from app.cosmo import nutrition, telemetry
 from app.cosmo.service import (
     alert_provenance,
     astronaut_logs,
@@ -199,6 +199,10 @@ def home(session: Session, astronaut: AppAstronaut, m: AppMission, day: int) -> 
         "orbi": ({"id": note.id, "title": note.title, "text": note.body.split("\n\n")[0], "types": note.patterns}
                  if note else None),
         "unreadGroundMessages": len(unread),
+        # Health Overview: device sync, latest vitals and what Orbi is waiting to confirm.
+        "sync": telemetry.sync_status(session, astronaut),
+        "vitals": telemetry.latest_vitals(session, astronaut.id),
+        "pendingConfirmations": telemetry.pending_count(session, astronaut.id),
         "provenance": "RULE_DERIVED",
     }
 

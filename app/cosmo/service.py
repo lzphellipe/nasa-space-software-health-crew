@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.cosmo import logic
 from app.cosmo.models import AppAlert, AppAstronaut, AppGroundMessage, AppLog, AppMission, AppPlanMeal
 from app.models import AstronautPreference, ProactiveMessage, utcnow
-from app.provenance import DERIVED, SIMULATED, USER
+from app.provenance import DERIVED, DEVICE, SIMULATED, USER
 from app.services.support import open_request
 
 PROACTIVE_INTERVAL_DAYS = 7
@@ -53,7 +53,8 @@ def plan_kcal_by_day(session: Session, astronaut_id: str) -> dict[int, float]:
 
 
 def log_provenance(log: AppLog) -> str:
-    return SIMULATED if log.source == "seed" else USER
+    """seed and simulator: simulated; device: measured by a real device and confirmed; app: typed in."""
+    return {"seed": SIMULATED, "simulator": SIMULATED, "device": DEVICE}.get(log.source, USER)
 
 
 def alert_provenance(alert: AppAlert) -> str:

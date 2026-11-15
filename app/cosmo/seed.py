@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth.security import hash_password
 from app.config import SEED_DIR, Settings
-from app.cosmo import logic, nutrition
+from app.cosmo import logic, nutrition, telemetry
 from app.cosmo.models import (
     AppAlert,
     AppAstronaut,
     AppCalendarEvent,
     AppChatMessage,
+    AppDeviceReading,
     AppFood,
     AppPlanMeal,
     AppEnvironmentReading,
@@ -169,6 +170,14 @@ def ensure_extras(session: Session, settings: Settings) -> None:
             session.add(AppFood(id=food_id, name=name, serving_g=serving, kcal=kcal, protein_g=protein,
                                 carbs_g=carbs, fat_g=fat))
     session.flush()
+
+    # Simulated device sync (last 24 h) so the Health Overview has data; real devices replace it.
+    if not session.scalar(select(func.count()).select_from(AppDeviceReading)):
+        day = logic.today(session, mission)
+        now = datetime.now(timezone.utc)
+        for astronaut in session.scalars(select(AppAstronaut).where(AppAstronaut.role != "test")):
+            for device, items in telemetry.simulate(astronaut, day, now).items():
+                telemetry.ingest(session, astronaut, day, "simulator", device, items, simulated=True)
 
     for astronaut in session.scalars(select(AppAstronaut)):
         has_plan = session.scalar(select(func.count()).select_from(AppPlanMeal)

@@ -31,7 +31,7 @@ def list_timepoints(db: Session = Depends(get_db)):
 
 @router.get("/analytes", response_model=list[AnalyteOut], summary="Measured analytes")
 def list_analytes(
-    panel: str | None = Query(None, description="cbc | cmp | cardio"),
+    panel: str | None = Query(None, description="cbc | cmp | cardio | immune | alamar"),
     category: str | None = Query(None, description="See /categories"),
     db: Session = Depends(get_db),
 ):
@@ -68,7 +68,8 @@ def list_measurements(
     db: Session = Depends(get_db),
 ):
     stmt = q.filtered_query(
-        crew_id.upper() if crew_id else None, timepoint, phase, panel, category, analyte, status, flag
+        crew_id.upper() if crew_id else None, timepoint, phase, panel, category, analyte, status, flag,
+        include_research=True,
     )
     total = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
     rows = q.fetch_rows(db, stmt.limit(limit).offset(offset))
@@ -88,7 +89,7 @@ EXPORT_FIELDS = [
     response_class=StreamingResponse,
 )
 def export_measurements(db: Session = Depends(get_db)):
-    rows = q.fetch_rows(db, q.filtered_query())
+    rows = q.fetch_rows(db, q.filtered_query(include_research=True))
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=EXPORT_FIELDS)
     writer.writeheader()

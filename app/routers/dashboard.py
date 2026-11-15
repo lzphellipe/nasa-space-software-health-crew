@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Analyte, CrewMember, IngestRun, Sample, Study
-from app.osdr.datasets import MISSION
+from app.osdr.datasets import DATASETS, MISSION, RESEARCH_PANELS
 from app.routers.crew import crew_member_out
 from app.schemas import (
     Alert,
@@ -39,17 +39,28 @@ def overview(timepoint: str | None = Query(None, description="Timepoint for the 
     per_crew = q.status_by_crew(db, tp.code)
 
     tp_statuses = defaultdict(list)
-    for m, _, t in q.fetch_rows(db, q.base_query()):
+    for m, _, t in q.fetch_rows(db, q.filtered_query()):
         tp_statuses[t.code].append(m.status)
+
+    clinical = Analyte.panel.not_in(RESEARCH_PANELS)
+    research = []
+    for spec in DATASETS:
+        if spec.research:
+            research.append({
+                "panel": spec.panel, "panelName": spec.panel_name, "study": spec.study.id, "file": spec.file_name,
+                "analyteCount": db.scalar(select(func.count()).select_from(Analyte).where(Analyte.panel == spec.panel)) or 0,
+                "sampleCount": db.scalar(select(func.count()).select_from(Sample).where(Sample.panel == spec.panel)) or 0,
+                "logScale": spec.log_scale,
+            })
 
     last = db.scalars(select(IngestRun).order_by(IngestRun.id.desc()).limit(1)).first()
     return Overview(
         mission=MISSION,
         studies=[StudyOut.model_validate(s) for s in db.scalars(select(Study).where(Study.id.like("OSD-%")).order_by(Study.id))],
         crew_count=len(crew),
-        sample_count=db.scalar(select(func.count()).select_from(Sample)) or 0,
+        sample_count=db.scalar(select(func.count()).select_from(Sample).where(Sample.panel.not_in(RESEARCH_PANELS))) or 0,
         measurement_count=q.measurement_count(db),
-        analyte_count=db.scalar(select(func.count()).select_from(Analyte)) or 0,
+        analyte_count=db.scalar(select(func.count()).select_from(Analyte).where(clinical)) or 0,
         default_timepoint=tp.code,
         timepoints=[
             TimepointStatus(timepoint=q.timepoint_out(t), counts=q.count_statuses(tp_statuses[t.code]))
@@ -57,6 +68,7 @@ def overview(timepoint: str | None = Query(None, description="Timepoint for the 
         ],
         crew=[crew_member_out(c, tp.code, per_crew.get(c.id, [])) for c in crew],
         last_ingest=IngestRunOut.model_validate(last) if last else None,
+        research_panels=research,
     )
 
 
