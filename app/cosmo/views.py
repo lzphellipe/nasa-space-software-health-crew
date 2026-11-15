@@ -38,7 +38,7 @@ WEEKLY_METRICS = ["bone_density", "muscle_mass", "strength", "aerobic"]
 def log_out(l: AppLog) -> LogOut:
     return LogOut(id=l.id, astronaut_id=l.astronaut_id, type=l.type, timestamp=l.timestamp, mission_day=l.mission_day,
                   environment_id=l.environment_id, note=l.note, coins_earned=l.coins_earned, data=l.data,
-                  provenance=log_provenance(l))
+                  provenance=log_provenance(l), received_at=l.created_at, updated_at=l.updated_at)
 
 
 def alert_out(a: AppAlert) -> AlertOut:

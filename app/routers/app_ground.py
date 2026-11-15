@@ -10,8 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.deps import require_care_team
-from app.cosmo import logic, nutrition, telemetry, views
-from app.cosmo.models import AppAlert, AppAstronaut, AppEnvironmentReading, AppGroundMessage, AppLog
+from app.cosmo import logic, nutrition, offline, telemetry, views
+from app.cosmo.models import AppAlert, AppAstronaut, AppEnvironmentReading, AppGroundMessage, AppLog, AppSyncOp
 from app.cosmo.schemas import (
     AlertOut,
     DailySummaryOut,
@@ -67,6 +67,8 @@ def crew(db: Session = Depends(get_db)):
             "lastSyncAt": telemetry._iso(telemetry.last_sync(db, a.id)),
             "pendingConfirmations": telemetry.pending_count(db, a.id),
             "vitals": telemetry.latest_vitals(db, a.id),
+            # How old this row can be: last contact of the app and of the devices (offline queue, comm delay).
+            "link": offline.link(db, a, m),
             "areas": ev.areas,
             "mood": {"level": moods[-1].data["level"], "label": moods[-1].data["label"],
                      "missionDay": moods[-1].mission_day} if moods else None,
@@ -228,6 +230,17 @@ def astronaut_telemetry(astronaut_id: str, metric: str | None = None, hours: int
 
     a = _astronaut(db, astronaut_id)
     return telemetry_view(db, a.id, metric, hours, limit) | {"sync": telemetry.sync_status(db, a)}
+
+
+@router.get("/astronauts/{astronaut_id}/sync", summary="Link with one astronaut's app: last contact and offline operations received")
+def astronaut_sync(astronaut_id: str, limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db)):
+    """`lagSec` is the time between the astronaut doing something offline and the server receiving it."""
+    m, _ = _mission(db)
+    a = _astronaut(db, astronaut_id)
+    ops = db.scalars(select(AppSyncOp).where(AppSyncOp.astronaut_id == a.id)
+                     .order_by(AppSyncOp.received_at.desc(), AppSyncOp.id.desc()).limit(limit))
+    return {"astronautId": a.id, "link": offline.link(db, a, m),
+            "operations": [{k: v for k, v in offline.op_out(op).items() if k != "result"} for op in ops]}
 
 
 @router.get("/confirmations", summary="Orbi confirmations of the crew: pending, answered checks, confirmed readings")
