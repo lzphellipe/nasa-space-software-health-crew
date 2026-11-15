@@ -11,7 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app import db
 from app.config import get_settings
-from app.routers import catalog, crew, dashboard, ingest
+from app.routers import agent, catalog, crew, dashboard, ingest
 from app.services.ingest import database_is_empty, run_ingestion
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -54,7 +54,7 @@ app.add_middleware(
 )
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
-for router in (crew.router, dashboard.router, catalog.router, ingest.router):
+for router in (crew.router, dashboard.router, catalog.router, ingest.router, agent.router):
     app.include_router(router)
 
 
