@@ -485,6 +485,28 @@ TypeScript types can be generated from the schema: `npx openapi-typescript http:
 
 On a physical device `localhost` is the phone itself; use the computer's LAN IP (or `10.0.2.2` on the Android emulator).
 
+## Deploy (Azure App Service)
+
+Live demo: **https://crew-health-api-univesp.azurewebsites.net** (`/docs` for the interactive docs).
+
+`deploy/azure.sh` creates a new App Service (Linux, Python 3.12) and deploys the API to it:
+
+```bash
+az login
+./deploy/azure.sh crew-health-api-univesp mexicocentral B1   # app name, region, SKU
+```
+
+- It creates the resource group `rg-<app>`, the plan `plan-<app>` and the web app. It then sets the app settings, the startup command, Always On and the `/health` check, and deploys a zip of `app/` and `requirements.txt` (App Service installs the requirements).
+- SQLite lives in `/home/data`, which App Service keeps across restarts. Use one worker, so there is a single scheduler and SQLite stays safe. Data is loaded from the bundled files on first start (`INGEST_SOURCE=bundled`).
+- `JWT_SECRET` and `ADMIN_API_KEY` are generated at random and stored only in the app settings.
+- Azure for Students subscriptions only allow some regions (here: `austriaeast`, `canadacentral`, `belgiumcentral`, `northcentralus`, `mexicocentral`). Check yours with `az policy assignment list`.
+- To redeploy code: `cd` to the repo, zip `app` and `requirements.txt`, then `az webapp deploy -g rg-<app> -n <app> --src-path app.zip --type zip`.
+- B1 costs about US$13 a month. To stop the charges, run `az group delete -n rg-<app>`; `az webapp stop` is not enough, because the plan is still billed.
+
+The `Dockerfile` reads the port from `PORT` (default 8000), so the same image also runs on container hosts.
+
+GitHub Actions (`.github/workflows/tests.yml`) runs the test suite on every push to `main` and on pull requests.
+
 ## Configuration
 
 See `.env.example`. Main variables: `DATABASE_URL`, `JWT_SECRET`, `SEED_DEMO_USERS`, `DEMO_PASSWORD`, `CURRENT_MISSION_DAY`, `SCHEDULER_ENABLED`, `DETECTION_INTERVAL_MINUTES`, `PROACTIVE_MIN_INTERVAL_DAYS`, `SUPPORT_WEBHOOK_URL`, `INGEST_SOURCE`, `CORS_ORIGINS`, `ADMIN_API_KEY`, `SYNTHETIC_SEED`.
