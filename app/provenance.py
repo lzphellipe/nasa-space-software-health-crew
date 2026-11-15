@@ -140,6 +140,11 @@ SOURCES = [
 
 # Longest prefix first. The header lists every kind of data a route returns.
 ROUTES: list[tuple[str, list[str]]] = [
+    ("/api/v1/app/me/orbi/", [USER, SIMULATED, DERIVED]),
+    ("/api/v1/app/me/uploads", [USER]),
+    ("/api/v1/app/uploads", [USER]),
+    ("/api/v1/app/foods", [SIMULATED]),
+    ("/api/v1/app/me/meal-plan", [SIMULATED, USER]),
     ("/api/v1/app/me/logs", [USER, SIMULATED, DERIVED]),
     ("/api/v1/app/me/ground-messages", [USER, SIMULATED]),
     ("/api/v1/app/me", [USER, SIMULATED, DERIVED]),

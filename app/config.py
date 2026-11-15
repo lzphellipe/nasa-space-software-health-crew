@@ -92,6 +92,12 @@ class Settings:
     # Mission day used as "today": empty = mission.json "today" (12), a number, or "auto" (from the calendar)
     app_mission_day: str | None = field(default_factory=lambda: os.getenv("APP_MISSION_DAY") or None)
     app_demo_pin: str = field(default_factory=lambda: os.getenv("APP_DEMO_PIN", "2026"))
+    # Extra demo accounts of the app: Crew ID TEST (999999 coins) and GROUND (Mission Control).
+    app_test_pin: str = field(default_factory=lambda: os.getenv("APP_TEST_PIN", "0000"))
+    app_ground_pin: str = field(default_factory=lambda: os.getenv("APP_GROUND_PIN", "2026"))
+    # Files sent by the app (voice notes, injury photos).
+    upload_dir: Path = field(default_factory=lambda: Path(os.getenv("UPLOAD_DIR", "./data/uploads")))
+    upload_max_mb: int = field(default_factory=lambda: int(os.getenv("UPLOAD_MAX_MB", "10")))
 
     # PDF knowledge base
     knowledge_max_upload_mb: float = field(

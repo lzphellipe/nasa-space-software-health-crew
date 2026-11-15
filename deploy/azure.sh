@@ -19,6 +19,7 @@ az webapp config appsettings set -g "$RG" -n "$APP" -o none --settings \
   SCM_DO_BUILD_DURING_DEPLOYMENT=true \
   DATABASE_URL="sqlite:////home/data/crew_health.db" \
   RAW_CACHE_DIR="/home/data/raw" \
+  UPLOAD_DIR="/home/data/uploads" \
   INGEST_SOURCE=bundled \
   CORS_ORIGINS="*" \
   JWT_SECRET="$(openssl rand -base64 32)" \

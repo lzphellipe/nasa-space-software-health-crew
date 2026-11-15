@@ -16,6 +16,7 @@ from app.routers import analog, auth, care, catalog, crew, dashboard, ingest, kn
 from app.routers import app_ground, app_me, app_public
 from app.routers import provenance as provenance_router
 from app.services.ingest import database_is_empty, run_ingestion
+from app.cosmo.seed import ensure_extras as ensure_cosmo_extras
 from app.cosmo.seed import seed_if_empty as seed_cosmo
 from app.services.knowledge import load_bundled
 from app.services.monitoring import backfill_if_empty, scheduler_loop
@@ -46,6 +47,7 @@ async def lifespan(_: FastAPI):
             seed_demo_users(session, settings.demo_password)
         if settings.app_seed_on_startup:
             seed_cosmo(session, settings)
+            ensure_cosmo_extras(session, settings)
         if load_bundled(session):
             log.info("Indexed the bundled PDF knowledge base")
         result = backfill_if_empty(session)
