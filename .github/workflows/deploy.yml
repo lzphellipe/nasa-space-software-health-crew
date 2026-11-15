@@ -52,26 +52,18 @@ jobs:
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           package: release.zip
 
-      # The first start after a deploy loads the data and can take several minutes.
-      - name: Wait for the API
+      # The old version keeps answering while the new one starts, so wait for a route of this
+      # version (not just /health). The first start after a deploy can take several minutes.
+      - name: Wait for the new version
         run: |
           for i in $(seq 1 60); do
-            code=$(curl -s -m 20 -o /dev/null -w '%{http_code}' "$APP_URL/health" || true)
-            echo "attempt $i: /health $code"
-            if [ "$code" = "200" ]; then exit 0; fi
+            if curl -sf -m 30 "$APP_URL/openapi.json" -o openapi.json \
+               && python3 -c "import json,sys; p=json.load(open('openapi.json'))['paths']; sys.exit(0 if all(r in p for r in ['/api/v1/app/me/sync','/api/v1/app/me/offline-bundle','/api/v1/app/telemetry/metrics']) else 1)"; then
+              echo "attempt $i: new version is answering"
+              exit 0
+            fi
+            echo "attempt $i: not yet"
             sleep 20
           done
-          echo "::error::The API did not answer 200 on /health within 20 minutes"
+          echo "::error::The new version did not answer within 20 minutes (the deploy itself may have worked; check $APP_URL/docs)"
           exit 1
-
-      - name: Check the deployed routes
-        run: |
-          curl -sf -m 60 "$APP_URL/openapi.json" -o openapi.json
-          python3 - <<'PY'
-          import json, sys
-          paths = json.load(open("openapi.json"))["paths"]
-          needed = ["/api/v1/app/me/sync", "/api/v1/app/me/offline-bundle", "/api/v1/app/telemetry/metrics"]
-          missing = [p for p in needed if p not in paths]
-          print(f"{len(paths)} routes; missing: {missing or 'none'}")
-          sys.exit(1 if missing else 0)
-          PY
