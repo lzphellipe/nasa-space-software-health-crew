@@ -94,13 +94,14 @@ POST /api/v1/app/auth/login
 | Chat with Orbi | `POST /app/me/orbi/chat` · `GET /app/me/orbi/messages` |
 | Device sync (wearable, cuff, dosimeter, EVA suit) | `POST /app/me/telemetry` · `POST /app/me/telemetry/simulate` · `GET /app/me/telemetry` · `GET /app/me/devices/status` · `GET /app/telemetry/metrics` |
 | Orbi confirmations (confirm a reading, quick checks) | `GET /app/me/confirmations` · `POST /app/me/confirmations/{id}/confirm\|answer\|dismiss` |
+| Offline: local copy, queue upload, changes | `GET /app/me/offline-bundle` · `POST /app/me/sync` · `GET /app/me/changes?since=` · `GET /app/me/sync/ops` |
 | Uploads (voice note, injury photo) | `POST /app/me/uploads` · `GET /app/uploads/{name}` |
 | Meal plan, food catalog | `GET /app/me/meal-plan?day=` · `GET /app/foods?q=` |
 | Avatar, shop | `GET`/`PUT /app/me/avatar` · `POST /app/me/avatar/purchase` · `POST /app/me/avatar/equip` · `GET /app/shop` |
 | Leaderboard | `GET /app/leaderboard?by=logs\|coins` |
 | Calendar, journal | `GET /app/me/calendar` · `GET /app/me/journal` |
 | Mission | `GET /app/mission` |
-| **Ground dashboard** | `GET /app/ground/crew` · `/alerts?minLevel=` · `/sleep` · `/environment` · `/astronauts/{id}/status\|summaries\|logs\|meal-plan` · `GET`/`POST /messages` · `POST /messages/{id}/read` |
+| **Ground dashboard** | `GET /app/ground/crew` · `/alerts?minLevel=` · `/sleep` · `/environment` · `/astronauts/{id}/status\|summaries\|logs\|meal-plan\|telemetry\|sync` · `GET`/`POST /messages` · `POST /messages/{id}/read` |
 
 All routes start with `/api/v1`.
 
@@ -142,6 +143,49 @@ POST /api/v1/app/me/telemetry
   - `kind: "check"`: a value outside its usual range: SpO2 < 92%, temperature ≥ 37.8 °C, breathing > 24/min, resting heart rate ≥ 120, EVA heart rate ≥ 160, suit CO2 ≥ 8 mmHg, suit pressure < 27.5 kPa. One quick question, one per metric per day. `POST …/answer {"answer": "ok"}` or `{"answer": "not_ok", "symptoms": ["shortness_of_breath"]}`: "not OK" creates a `device_check` alert sent to the ground and a support request (urgent for SpO2 and EVA checks). Thresholds are illustrative.
 - **Health Overview:** `GET /app/me/home` adds `sync` (last sync, minutes since, devices), `vitals` (latest heart rate, SpO2, temperature, breathing, HRV) and `pendingConfirmations`.
 - **Ground:** `ground/crew` adds `lastSyncAt`, `pendingConfirmations` and `vitals`; `GET /app/ground/astronauts/{id}/telemetry?metric=&hours=` and `GET /app/ground/confirmations?astronautId=&status=`.
+
+### Offline use and communication delay
+
+Far from Earth the link has a delay (`commDelaySec` of the mission) and drops. The app has to keep working with no server, and the ground team has to know how old the data on its screen is. The server side of that:
+
+**1. Local copy.** `GET /app/me/offline-bundle` returns, in one answer (about 70 KB), what the app needs with no link: profile and baseline, home, status, 7 daily summaries, the logs of the last 14 days, active alerts, pending confirmations, the thread with Mission Control, the meal plan of today and the next 2 days, the food catalog, and:
+
+- `rules`: the rules of this API as data (score weights, status levels, coins, mission goals, and `deviceChecks` with `metric`, `op`, `threshold`, `urgent`, `question`). The app can run the same quick checks on a reading taken offline.
+- `orbi`: Orbi's rule-based replies per topic, built with today's data, with their keywords. For `crisis` and `urgent`, `offlineNote` says that the ground team will only be reached when the link is back and to tell a crewmate now.
+- `cursor`: pass it to `/sync` or `/changes` to get only what changed later.
+
+**2. Queue.** While offline, the app saves each action in a local queue with an id it makes itself (`opId`, a UUID) and the time on the device (`recordedAt`). When the link is back it sends the queue:
+
+```jsonc
+// POST /api/v1/app/me/sync
+{"deviceId": "phone-1", "clientTime": "2026-11-15T18:00:00Z", "since": "<cursor>", "queuedRemaining": 0, "ops": [
+  {"opId": "9f0c…", "type": "log.create", "recordedAt": "2026-11-14T21:10:00Z", "missionDay": 11,
+   "payload": {"type": "mood", "data": {"level": 2, "tags": ["tired"]}}},
+  {"opId": "41ab…", "type": "log.update", "targetId": "op:9f0c…", "payload": {"type": "mood", "data": {"level": 3}}},
+  {"opId": "77de…", "type": "telemetry", "payload": {"source": "ble", "device": "pulse_oximeter",
+   "readings": [{"metric": "spo2", "measuredAt": "2026-11-15T09:00:00Z", "value": 89}]}},
+  {"opId": "c3d4…", "type": "confirmation.answer", "targetId": "op:77de…",
+   "payload": {"metric": "spo2", "answer": "not_ok", "symptoms": ["shortness_of_breath"]}},
+  {"opId": "e5f6…", "type": "message.send", "payload": {"text": "Felt off yesterday.", "attachments": ["op:9f0c…"]}}
+]}
+// → {"serverTime": "…", "clockSkewSec": 1, "summary": {"received": 5, "applied": 5, "duplicates": 0, "rejected": 0, "conflicts": 0},
+//    "results": [{"opId": "9f0c…", "status": "applied", "duplicate": false, "entityId": "log-1a2b3c4d", "lagSec": 75000, "result": { … }}, … ],
+//    "changes": {"cursor": "…", "logs": [ … ], "alerts": [ … ], "activeAlertIds": [ … ], "confirmations": [ … ],
+//                "pendingConfirmationIds": [ … ], "groundMessages": [ … ], "home": { … }}}
+```
+
+- Types: `log.create`, `log.update`, `telemetry`, `confirmation.confirm`, `confirmation.answer`, `confirmation.dismiss`, `message.send`, `message.read`. `payload` is the body of the matching online route, and the same rules run (coins, alerts, Orbi notes, support requests). Up to 500 operations per batch, applied in the order sent.
+- **Each `opId` is applied at most once.** If the answer is lost, send the same batch again: operations already received come back with `duplicate: true` and their first result. Nothing is saved twice and coins are not given twice.
+- `status` of each result: `applied`; `rejected` (the server refused it, `error` says why: take it out of the queue and show it); `conflict` (`log.update` with `baseUpdatedAt` older than the server copy, which comes in `result`; the app decides what to keep and sends a new operation). A 5xx or a network error means nothing is known: send again.
+- `targetId: "op:<opId>"` points to something created earlier in the queue, which has no server id yet: a log (to edit it or attach it to a message), or a telemetry operation (to answer the question the app asked on the device; `payload.metric` picks the confirmation).
+- `missionDay` puts a `log.create` on the day it was recorded (not after today). Alerts are evaluated again for today, and their 7-day window includes the late log. `recordedAt` later than the server clock is brought back to now (`clockAdjustedOps`).
+- `changes` in the answer is what changed after `since`, including what this batch created. `GET /app/me/changes?since=` returns the same with no upload. Ground messages only appear once they arrive (communication delay).
+- Single requests can be retried safely too: `POST /app/me/logs` and `POST /app/me/ground-messages` accept the header `Idempotency-Key: <uuid>`.
+- Online only: chat with Orbi through the server (use the bundled replies), uploads, shop purchases and meal-plan edits by the ground team.
+
+**3. Ground view.** Logs carry `timestamp` (when it happened) and `receivedAt` (when the server got it). `GET /app/ground/crew` adds `link` to each row: `status` (`online`: contact in the last 15 minutes; `delayed`: up to 12 hours; `offline`: longer; `unknown`: never), `lastContactAt`, `lastDeviceSyncAt`, `minutesSinceContact`, `queuedOnDevice` and `lastBatch` (how many operations and the largest delay). `GET /app/ground/astronauts/{id}/sync` lists the operations received, each with `lagSec`, the time between the astronaut doing it and the server receiving it.
+
+What is not in the backend: the queue and the local storage themselves live in the app (for example SQLite or AsyncStorage in React Native). The current frontend calls the API directly and does not use these routes yet.
 
 ### Module names and log types
 
@@ -247,7 +291,7 @@ Every item has a `provenance` and every response an `X-Data-Provenance` header; 
 | `USER_REPORTED` | typed in by the astronaut |
 | `RULE_DERIVED` | computed by documented rules, no AI |
 | `REFERENCE_DOCUMENT` | text from the PDF knowledge base |
-| `AI_GENERATED` | reserved for a language model; this API never emits it |
+| `AI_GENERATED` | text written by a language model: only `/api/v1/orbi` (insights and consultation briefings), when `ORBI_AI_ENABLED=true` and `GROQ_API_KEY` is set; each answer says so in `aiGenerated` and `messageSource` |
 | `DEVICE_MEASURED` | sent by a paired wearable, cuff, dosimeter or EVA suit |
 
 ### Replacing the mock in the frontend
@@ -733,12 +777,23 @@ az login
 - SQLite lives in `/home/data`, which App Service keeps across restarts. Use one worker, so there is a single scheduler and SQLite stays safe. Data is loaded from the bundled files on first start (`INGEST_SOURCE=bundled`).
 - `JWT_SECRET` and `ADMIN_API_KEY` are generated at random and stored only in the app settings.
 - Azure for Students subscriptions only allow some regions (here: `austriaeast`, `canadacentral`, `belgiumcentral`, `northcentralus`, `mexicocentral`). Check yours with `az policy assignment list`.
-- To redeploy code: `cd` to the repo, zip `app` and `requirements.txt`, then `az webapp deploy -g rg-<app> -n <app> --src-path app.zip --type zip`.
 - B1 costs about US$13 a month. To stop the charges, run `az group delete -n rg-<app>`; `az webapp stop` is not enough, because the plan is still billed.
 
 The `Dockerfile` reads the port from `PORT` (default 8000), so the same image also runs on container hosts.
 
-GitHub Actions (`.github/workflows/tests.yml`) runs the test suite on every push to `main` and on pull requests.
+### Continuous deploy (GitHub Actions)
+
+`.github/workflows/deploy.yml` runs on every push to `main` (a merged pull request) and can also be started by hand (Actions > deploy > Run workflow). It runs the tests, deploys the zip of `app/` and `requirements.txt` to the App Service, waits for `/health` and checks that the new routes are in `/openapi.json`. If the tests fail, nothing is deployed. Pull requests only run the tests (`tests.yml`).
+
+Setup, once:
+
+1. Azure portal > the App Service > Configuration > General settings > **SCM Basic Auth Publishing Credentials: On** > Save. The publish profile needs it. (CLI: `az resource update -g rg-<app> --namespace Microsoft.Web --resource-type basicPublishingCredentialsPolicies --parent sites/<app> --name scm --set properties.allow=true`.)
+2. Overview > **Download publish profile**.
+3. GitHub > the repository > Settings > Secrets and variables > Actions > New repository secret: name `AZURE_WEBAPP_PUBLISH_PROFILE`, value the whole content of the downloaded file.
+
+The publish profile is a deploy password for this one app: keep it only in the secret. To replace it, use "Reset publish profile" in the portal and update the secret. Do not change app settings while a deploy is running: the restart interrupts it.
+
+To deploy by hand instead: zip `app` and `requirements.txt`, then `az webapp deploy -g rg-<app> -n <app> --src-path app.zip --type zip`.
 
 ## Configuration
 
@@ -748,7 +803,7 @@ See `.env.example`. Main variables: `DATABASE_URL`, `JWT_SECRET`, `SEED_DEMO_USE
 
 - **Pattern rules and messages are illustrative.** Thresholds are generic screening values and the message texts were not reviewed by a clinician or psychologist. They show how the system works; they are not medical criteria.
 - **The scheduler runs inside the API process.** With several workers, each runs it; use one worker or move the cycle to a separate job for production.
-- **No AI agent.** `/agent-context` only prepares data; nothing in this service calls a language model.
+- **AI agent only in `/api/v1/orbi`.** Insights and consultation briefings call a language model (CrewAI with Groq) when `ORBI_AI_ENABLED=true` and `GROQ_API_KEY` is set, and then send selected (simulated) health measurements to that provider; without them the text is statistical (`messageSource: statistical_fallback`). The model's text is not clinically validated. See `app/ORBI_STEP2_README.md`. The rest of the service, including the CosmoMedic chat, is rule-based.
 - **AGBRESA is an analog.** Bed rest reproduces some effects of microgravity (fluid shift, deconditioning) in healthy volunteers on Earth; it is not spaceflight, and these are not the Inspiration4 crew. Do not join it with the other data sets as if it described the same people.
 - **Synthetic mission.** The daily vitals are generated, not measured. Effects follow published orders of magnitude for long ISS stays, but the individual curves, events and thresholds are illustrative. Use the data to build and evaluate the agent and the apps, not to draw physiological conclusions.
 - **Four people, seven timepoints.** The baseline uses three samples per person; z-scores are indicative, not statistical tests.

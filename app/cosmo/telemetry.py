@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import operator
 import random
 import uuid
 from dataclasses import dataclass
@@ -60,16 +61,26 @@ METRICS: dict[str, Metric] = {m.code: m for m in [
     Metric("eva_metabolic_rate", "W", "EVA metabolic rate", 50, 1500, eva=True),
 ]}
 
-# Quick checks: (test, question, urgent). One pending check per metric per mission day.
-CHECKS = {
-    "spo2": (lambda v: v < 92, "Your blood oxygen read {v:g}% at {t}. How are you feeling? Any shortness of breath?", True),
-    "body_temperature": (lambda v: v >= 37.8, "Your temperature read {v:.1f} °C at {t}. Do you feel feverish or unwell?", False),
-    "respiratory_rate": (lambda v: v > 24, "Your breathing rate read {v:.0f}/min at {t}, higher than usual. Are you OK?", False),
-    "heart_rate": (lambda v: v >= 120, "Your heart rate was {v:.0f} bpm at rest at {t}. Any chest discomfort, palpitations or dizziness?", False),
-    "eva_heart_rate": (lambda v: v >= 160, "Your heart rate reached {v:.0f} bpm during the EVA at {t}. How do you feel now?", True),
-    "eva_co2": (lambda v: v >= 8, "Suit CO2 reached {v:.1f} mmHg at {t}. Any headache, dizziness or shortness of breath?", True),
-    "eva_suit_pressure": (lambda v: v < 27.5, "Suit pressure dropped to {v:.1f} kPa at {t}. Are you OK? Tell the crew and Mission Control.", True),
+# Quick checks: (comparison, threshold, question, urgent). One pending check per metric per mission day.
+# Declarative so the app can run the same checks on the device while there is no link (offline bundle).
+CHECK_RULES = {
+    "spo2": ("<", 92, "Your blood oxygen read {v:g}% at {t}. How are you feeling? Any shortness of breath?", True),
+    "body_temperature": (">=", 37.8, "Your temperature read {v:.1f} °C at {t}. Do you feel feverish or unwell?", False),
+    "respiratory_rate": (">", 24, "Your breathing rate read {v:.0f}/min at {t}, higher than usual. Are you OK?", False),
+    "heart_rate": (">=", 120, "Your heart rate was {v:.0f} bpm at rest at {t}. Any chest discomfort, palpitations or dizziness?", False),
+    "eva_heart_rate": (">=", 160, "Your heart rate reached {v:.0f} bpm during the EVA at {t}. How do you feel now?", True),
+    "eva_co2": (">=", 8, "Suit CO2 reached {v:.1f} mmHg at {t}. Any headache, dizziness or shortness of breath?", True),
+    "eva_suit_pressure": ("<", 27.5, "Suit pressure dropped to {v:.1f} kPa at {t}. Are you OK? Tell the crew and Mission Control.", True),
 }
+_OPS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
+
+
+def _test(op: str, threshold: float):
+    return lambda v: _OPS[op](v, threshold)
+
+
+# (test, question, urgent)
+CHECKS = {metric: (_test(op, threshold), text, urgent) for metric, (op, threshold, text, urgent) in CHECK_RULES.items()}
 
 SYMPTOMS = ("shortness_of_breath", "chest_pain", "headache", "dizziness", "nausea", "fever", "fatigue",
             "palpitations", "pain", "other")

@@ -1,3 +1,5 @@
+"""Manual check of the Groq key: python scripts/check_groq.py (needs GROQ_API_KEY). Not part of the test suite."""
+
 import os
 
 from dotenv import load_dotenv

@@ -256,6 +256,9 @@ class LogOut(APIModel):
     coins_earned: int
     data: dict
     provenance: str
+    received_at: datetime | None = Field(None, description="When the server got it; later than timestamp for logs "
+                                                             "made offline or confirmed from a device reading")
+    updated_at: datetime | None = Field(None, description="Send it as baseUpdatedAt when editing the log offline")
 
 
 class LogSaved(APIModel):

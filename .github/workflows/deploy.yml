@@ -1,0 +1,69 @@
+name: deploy
+
+# Every push to main (a merged pull request) is tested and then deployed to Azure App Service.
+# Needs one repository secret: AZURE_WEBAPP_PUBLISH_PROFILE (see "Deploy" in the README).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-azure
+  cancel-in-progress: false
+
+env:
+  AZURE_WEBAPP_NAME: crew-health-api-univesp
+  APP_URL: https://crew-health-api-univesp.azurewebsites.net
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  deploy:
+    needs: tests
+    runs-on: ubuntu-latest
+    environment:
+      name: azure
+      url: ${{ env.APP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the deploy secret
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        run: |
+          if [ -z "$PUBLISH_PROFILE" ]; then
+            echo "::error::Secret AZURE_WEBAPP_PUBLISH_PROFILE is missing. Azure portal > App Service > Download publish profile, then GitHub > Settings > Secrets and variables > Actions > New repository secret."
+            exit 1
+          fi
+
+      # Same package as deploy/azure.sh: the code and requirements.txt; Azure installs the dependencies (Oryx build).
+      - name: Build the package
+        run: zip -qr release.zip app requirements.txt -x '*/__pycache__/*'
+
+      - name: Deploy to Azure App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: release.zip
+
+      # The old version keeps answering while the new one starts, so wait for a route of this
+      # version (not just /health). The first start after a deploy can take several minutes.
+      - name: Wait for the new version
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf -m 30 "$APP_URL/openapi.json" -o openapi.json \
+               && python3 -c "import json,sys; p=json.load(open('openapi.json'))['paths']; sys.exit(0 if all(r in p for r in ['/api/v1/app/me/sync','/api/v1/app/me/offline-bundle','/api/v1/app/telemetry/metrics']) else 1)"; then
+              echo "attempt $i: new version is answering"
+              exit 0
+            fi
+            echo "attempt $i: not yet"
+            sleep 20
+          done
+          echo "::error::The new version did not answer within 20 minutes (the deploy itself may have worked; check $APP_URL/docs)"
+          exit 1

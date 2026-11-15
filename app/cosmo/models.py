@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -231,3 +231,35 @@ class AppConfirmation(Base):
     simulated: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class AppSyncOp(Base):
+    """One operation the app queued while offline (or sent with an Idempotency-Key). Applied at most once."""
+
+    __tablename__ = "app_sync_ops"
+    __table_args__ = (UniqueConstraint("astronaut_id", "op_id", name="uq_app_sync_ops_astronaut_op"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("app_astronauts.id"), index=True)
+    op_id: Mapped[str] = mapped_column(String(64))  # id made by the app (UUID)
+    type: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(10))  # applied | rejected | conflict
+    http_status: Mapped[int] = mapped_column(Integer, default=200)
+    entity_id: Mapped[str | None] = mapped_column(String(40), nullable=True)  # log, message or confirmation id
+    recorded_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)  # on the device
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)  # on the server
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class AppSyncState(Base):
+    """Last contact of an astronaut's app with the server, for the ground team to know how old the data is."""
+
+    __tablename__ = "app_sync_state"
+
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("app_astronauts.id"), primary_key=True)
+    last_contact_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_upload_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_batch: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    queued_on_device: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
