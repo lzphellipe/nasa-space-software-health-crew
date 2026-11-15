@@ -140,3 +140,94 @@ class AppEnvironmentReading(Base):
     noise_db: Mapped[float] = mapped_column()
     radiation_usv_h: Mapped[float] = mapped_column()
     crew_present: Mapped[int] = mapped_column(Integer)
+
+
+class AppChatMessage(Base):
+    """Conversation with Orbi. Only "journal" mode is stored; "private" mode saves nothing."""
+
+    __tablename__ = "app_chat_messages"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # "msg-001"
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("app_astronauts.id"), index=True)
+    author: Mapped[str] = mapped_column(String(10))  # orbi | astronaut
+    text: Mapped[str] = mapped_column(Text)
+    timestamp: Mapped[datetime] = mapped_column(UTCDateTime())
+    mode: Mapped[str] = mapped_column(String(10), default="journal")
+    source: Mapped[str] = mapped_column(String(10), default="app")  # seed | app | rules
+
+
+class AppFood(Base):
+    """Station food catalog, used for meal swaps and to build meal plans. Values per serving."""
+
+    __tablename__ = "app_foods"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # "food-rice"
+    name: Mapped[str] = mapped_column(String(120))
+    serving_g: Mapped[float] = mapped_column()
+    kcal: Mapped[float] = mapped_column()
+    protein_g: Mapped[float] = mapped_column()
+    carbs_g: Mapped[float] = mapped_column()
+    fat_g: Mapped[float] = mapped_column()
+
+
+class AppPlanMeal(Base):
+    """One planned meal of one astronaut on one mission day, set by the medical team."""
+
+    __tablename__ = "app_meal_plan"
+    __table_args__ = (Index("ix_app_meal_plan_astronaut_day", "astronaut_id", "mission_day"),)
+
+    id: Mapped[str] = mapped_column(String(60), primary_key=True)  # "pm-ast-01-d12-lunch"
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("app_astronauts.id"))
+    mission_day: Mapped[int] = mapped_column(Integer)
+    slot: Mapped[str] = mapped_column(String(12))  # breakfast | lunch | dinner | snack
+    time: Mapped[str] = mapped_column(String(5))  # "08:00"
+    name: Mapped[str] = mapped_column(String(160))
+    items: Mapped[list] = mapped_column(JSON, default=list)
+    kcal: Mapped[float] = mapped_column()
+    protein_g: Mapped[float] = mapped_column()
+    carbs_g: Mapped[float] = mapped_column()
+    fat_g: Mapped[float] = mapped_column()
+
+
+class AppDeviceReading(Base):
+    """One reading synced from a wearable, cuff, dosimeter or EVA suit (or made by the simulator)."""
+
+    __tablename__ = "app_device_readings"
+    __table_args__ = (Index("ix_app_device_readings_astronaut_metric_time", "astronaut_id", "metric", "measured_at"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("app_astronauts.id"))
+    source: Mapped[str] = mapped_column(String(20))  # health_connect | healthkit | ble | eva_suit | simulator
+    device: Mapped[str] = mapped_column(String(60))  # watch | wrist_band | bp_cuff | dosimeter | eva_suit
+    metric: Mapped[str] = mapped_column(String(30))
+    values: Mapped[dict] = mapped_column(JSON)
+    unit: Mapped[str] = mapped_column(String(20))
+    measured_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    mission_day: Mapped[int] = mapped_column(Integer)
+    simulated: Mapped[bool] = mapped_column(default=False)
+    batch_id: Mapped[str] = mapped_column(String(40))
+
+
+class AppConfirmation(Base):
+    """Something Orbi asks the astronaut: confirm a reading as a log, or a quick check on how they feel."""
+
+    __tablename__ = "app_confirmations"
+    __table_args__ = (Index("ix_app_confirmations_astronaut_status", "astronaut_id", "status"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    astronaut_id: Mapped[str] = mapped_column(ForeignKey("app_astronauts.id"))
+    kind: Mapped[str] = mapped_column(String(10))  # log | check
+    metric: Mapped[str] = mapped_column(String(30))
+    reading_ids: Mapped[list] = mapped_column(JSON, default=list)
+    log_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    proposed: Mapped[dict] = mapped_column(JSON, default=dict)  # the log data, in the frontend format
+    question: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(12), default="pending")  # pending | confirmed | corrected | answered | dismissed
+    answer: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    log_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    alert_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    mission_day: Mapped[int] = mapped_column(Integer)
+    simulated: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)

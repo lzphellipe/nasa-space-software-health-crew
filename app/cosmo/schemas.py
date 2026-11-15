@@ -23,10 +23,17 @@ LOG_TYPES = ("mood", "sleep", "radiation", "measurement", "injury", "meal", "exe
 # --- log data per type (input) ----------------------------------------------------
 
 
+class VoiceNote(APIModel):
+    url: str = Field(min_length=1, max_length=500, description="From POST /app/me/uploads")
+    duration_sec: float = Field(ge=0, le=3600)
+    transcript: str | None = Field(None, max_length=5000)
+
+
 class MoodData(APIModel):
     level: int = Field(ge=1, le=5, description="5 great, 4 good, 3 okay, 2 tired, 1 stressed")
     label: Literal["great", "good", "okay", "tired", "stressed"] | None = None
     tags: list[Annotated[str, Field(max_length=30)]] = Field(default_factory=list, max_length=12)
+    voice_note: VoiceNote | None = None
 
     @model_validator(mode="after")
     def set_label(self):
@@ -128,14 +135,45 @@ class InjuryData(APIModel):
         return self
 
 
+class MealSwap(APIModel):
+    food_id: str = Field(max_length=40, description="An id from GET /app/foods")
+    servings: float = Field(1, gt=0, le=10)
+
+
 class MealData(APIModel):
-    name: str = Field(min_length=1, max_length=120)
-    items: list[Annotated[str, Field(max_length=60)]] = Field(default_factory=list, max_length=20)
-    kcal: float = Field(ge=0, le=5000)
-    protein_g: float = Field(0, ge=0, le=500)
-    carbs_g: float = Field(0, ge=0, le=1000)
-    fat_g: float = Field(0, ge=0, le=500)
-    taste_rating: int = Field(ge=1, le=5, description="Menu fatigue signal")
+    """Two ways to log a meal.
+
+    Planned meal: send `planMealId` and `adherence` (followed | partial + eatenPct | swapped + swaps | skipped).
+    Free meal (no plan): send `swaps` (catalog foods) or `name` + `kcal`.
+    The API computes kcal and macros in every case except a free meal sent with its own kcal.
+    """
+
+    plan_meal_id: str | None = Field(None, max_length=60, description="A meal id from GET /app/me/meal-plan")
+    adherence: Literal["followed", "partial", "swapped", "skipped"] | None = None
+    eaten_pct: int | None = Field(None, ge=0, le=100, description="Required when adherence is partial")
+    swaps: list[MealSwap] = Field(default_factory=list, max_length=20, description="What was eaten instead")
+    name: str | None = Field(None, min_length=1, max_length=160)
+    items: list[Annotated[str, Field(max_length=80)]] = Field(default_factory=list, max_length=20)
+    kcal: float | None = Field(None, ge=0, le=5000, description="Computed by the API for planned meals and swaps")
+    protein_g: float | None = Field(None, ge=0, le=500)
+    carbs_g: float | None = Field(None, ge=0, le=1000)
+    fat_g: float | None = Field(None, ge=0, le=500)
+    taste_rating: int | None = Field(None, ge=1, le=5, description="Optional. Menu fatigue signal")
+
+    @model_validator(mode="after")
+    def check_mode(self):
+        if self.plan_meal_id:
+            self.adherence = self.adherence or "followed"
+            if self.adherence == "partial" and not (self.eaten_pct and 0 < self.eaten_pct < 100):
+                raise ValueError("adherence partial needs eatenPct between 1 and 99")
+            if self.adherence == "swapped" and not self.swaps:
+                raise ValueError("adherence swapped needs swaps: [{foodId, servings}]")
+        else:
+            if self.adherence is not None:
+                raise ValueError("adherence needs planMealId")
+            if not self.swaps and (self.kcal is None or not self.name):
+                raise ValueError("a meal outside the plan needs swaps, or name and kcal")
+        return self
 
 
 class ExerciseData(APIModel):
@@ -227,6 +265,7 @@ class LogSaved(APIModel):
     logged_today: bool
     alerts: list[AlertOut]
     support_request_id: int | None = None
+    bonus: dict | None = Field(None, description="Streak bonus, e.g. {type: mood_streak_7, coins: 50, streak: 7}")
     message: str
 
 
@@ -274,10 +313,99 @@ class DailySummaryOut(APIModel):
     logs_done_count: int
     logs_total: int
     overall_score: int
+    status_level: str = Field(description="ok (score >= 70) | warn (50-69) | alert (< 50)")
     status_label: str
     areas: dict[str, str]
     domains: dict[str, str]
     provenance: str = "RULE_DERIVED"
+
+
+class OrbiChatIn(APIModel):
+    text: str = Field(min_length=1, max_length=4000)
+    mode: Literal["journal", "private"] = "journal"
+
+
+class PlanMealIn(APIModel):
+    slot: Literal["breakfast", "lunch", "dinner", "snack"]
+    time: str | None = Field(None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$", description="HH:MM; default by slot")
+    name: str | None = Field(None, min_length=1, max_length=160)
+    items: list[Annotated[str, Field(max_length=80)]] = Field(default_factory=list, max_length=20)
+    foods: list[MealSwap] = Field(default_factory=list, max_length=20,
+                                  description="Catalog foods; when given, items and nutrition are computed")
+    kcal: float | None = Field(None, ge=0, le=5000)
+    protein_g: float | None = Field(None, ge=0, le=500)
+    carbs_g: float | None = Field(None, ge=0, le=1000)
+    fat_g: float | None = Field(None, ge=0, le=500)
+
+    @model_validator(mode="after")
+    def check(self):
+        if not self.foods and (self.kcal is None or not self.name):
+            raise ValueError("a planned meal needs foods, or name and kcal (with proteinG, carbsG, fatG)")
+        return self
+
+
+class PlanDayIn(APIModel):
+    meals: list[PlanMealIn] = Field(min_length=1, max_length=4)
+
+    @model_validator(mode="after")
+    def unique_slots(self):
+        slots = [m.slot for m in self.meals]
+        if len(slots) != len(set(slots)):
+            raise ValueError("one meal per slot (breakfast, lunch, dinner, snack)")
+        return self
+
+
+class PlanDayBulk(PlanDayIn):
+    day: int = Field(ge=1)
+
+
+class PlanBulkIn(APIModel):
+    """Either `days` (explicit menus) or `seed` (the default 3-day rotation for a range of days)."""
+
+    days: list[PlanDayBulk] = Field(default_factory=list, max_length=400)
+    seed: bool = False
+    from_day: int | None = Field(None, ge=1)
+    to_day: int | None = Field(None, ge=1)
+
+    @model_validator(mode="after")
+    def check(self):
+        if not self.days and not self.seed:
+            raise ValueError("send days: [{day, meals}] or seed: true")
+        return self
+
+
+class ReadingIn(APIModel):
+    metric: str = Field(max_length=30, description="heart_rate, spo2, body_temperature, sleep_session, blood_pressure, "
+                                                    "radiation_dose, eva_co2... (GET /app/telemetry/metrics)")
+    measured_at: datetime
+    value: float | None = Field(None, description="Scalar metrics")
+    values: dict[str, Any] | None = Field(None, description="sleep_session: {bedtime, wakeTime, avgHr?, respRate?, "
+                                                             "movementEvents?, awakenings?}; blood_pressure: "
+                                                             "{systolic, diastolic, pulse?}; optional context")
+
+
+class TelemetryIn(APIModel):
+    source: Literal["health_connect", "healthkit", "ble", "eva_suit"]
+    device: Literal["watch", "wrist_band", "bp_cuff", "dosimeter", "eva_suit", "thermometer", "pulse_oximeter"]
+    readings: list[ReadingIn] = Field(min_length=1, max_length=2000)
+
+
+class SimulateIn(APIModel):
+    hours: int = Field(24, ge=1, le=48)
+    eva: bool = Field(False, description="Add a 6-hour EVA with suit telemetry")
+    anomaly: Literal["none", "low_spo2", "fever", "high_heart_rate", "eva_co2", "eva_pressure"] = "none"
+
+
+class ConfirmIn(APIModel):
+    correction: dict[str, Any] | None = Field(None, description="Fields of the proposed log to change, e.g. {quality: 2}")
+    note: str | None = Field(None, max_length=500)
+
+
+class AnswerIn(APIModel):
+    answer: Literal["ok", "not_ok"]
+    symptoms: list[Literal["shortness_of_breath", "chest_pain", "headache", "dizziness", "nausea", "fever",
+                           "fatigue", "palpitations", "pain", "other"]] = Field(default_factory=list, max_length=10)
+    note: str | None = Field(None, max_length=500)
 
 
 LogSaved.model_rebuild()

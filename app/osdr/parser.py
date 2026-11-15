@@ -130,8 +130,10 @@ def _range_layout(headers: list[str]) -> tuple[dict[str, tuple[str, str | None]]
 
 def parse_csv(text: str, layout: str) -> ParseResult:
     headers, rows = _read_rows(text)
-    if not headers or headers[0].lower() != "sample name":
-        raise ValueError("Expected the first column to be 'Sample Name'")
+    # Most files use "Sample Name"; the Alamar panel uses "Sample ID".
+    if not headers or headers[0].lower() not in ("sample name", "sample id"):
+        raise ValueError("Expected the first column to be 'Sample Name' or 'Sample ID'")
+    id_col = headers[0]
     data_cols = headers[1:]
     result = ParseResult()
 
@@ -148,6 +150,8 @@ def parse_csv(text: str, layout: str) -> ParseResult:
                 conc_cols[col] = (code, unit.lstrip("_") or None)
             elif col.endswith("_percent"):
                 pct_cols[col[: -len("_percent")]] = col
+            elif col.endswith("_percent_normalized_value"):
+                pct_cols[col[: -len("_percent_normalized_value")]] = col
         used = set(conc_cols) | set(pct_cols.values())
         for col, (code, unit) in conc_cols.items():
             result.analytes[code] = unit
@@ -159,7 +163,7 @@ def parse_csv(text: str, layout: str) -> ParseResult:
         result.warnings.append(f"Ignored columns with an unrecognized pattern: {', '.join(unused)}")
 
     for row in rows:
-        name = (row.get("Sample Name") or "").strip()
+        name = (row.get(id_col) or "").strip()
         key = parse_sample_name(name)
         if key is None:
             result.warnings.append(f"Skipped row with unrecognized sample name: {name!r}")

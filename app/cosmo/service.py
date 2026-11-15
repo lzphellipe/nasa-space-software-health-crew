@@ -9,9 +9,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.cosmo import logic
-from app.cosmo.models import AppAlert, AppAstronaut, AppGroundMessage, AppLog, AppMission
+from app.cosmo.models import AppAlert, AppAstronaut, AppGroundMessage, AppLog, AppMission, AppPlanMeal
 from app.models import AstronautPreference, ProactiveMessage, utcnow
-from app.provenance import DERIVED, SIMULATED, USER
+from app.provenance import DERIVED, DEVICE, SIMULATED, USER
 from app.services.support import open_request
 
 PROACTIVE_INTERVAL_DAYS = 7
@@ -43,11 +43,18 @@ def evaluate(session: Session, astronaut: AppAstronaut, day: int, m: AppMission 
              logs: list[AppLog] | None = None) -> logic.DayEvaluation:
     m = m or logic.mission(session)
     return logic.evaluate_day(astronaut, logs if logs is not None else astronaut_logs(session, astronaut.id), day,
-                              m.goals if m else {})
+                              m.goals if m else {}, plan_kcal_by_day(session, astronaut.id))
+
+
+def plan_kcal_by_day(session: Session, astronaut_id: str) -> dict[int, float]:
+    rows = session.execute(select(AppPlanMeal.mission_day, func.sum(AppPlanMeal.kcal))
+                           .where(AppPlanMeal.astronaut_id == astronaut_id).group_by(AppPlanMeal.mission_day))
+    return {day: float(kcal or 0) for day, kcal in rows}
 
 
 def log_provenance(log: AppLog) -> str:
-    return SIMULATED if log.source == "seed" else USER
+    """seed and simulator: simulated; device: measured by a real device and confirmed; app: typed in."""
+    return {"seed": SIMULATED, "simulator": SIMULATED, "device": DEVICE}.get(log.source, USER)
 
 
 def alert_provenance(alert: AppAlert) -> str:

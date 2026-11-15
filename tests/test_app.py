@@ -35,11 +35,13 @@ def test_mission_is_day_12_of_orbit_3(client):
 
 
 def test_daily_scores_reproduce_the_mock_stories(client, crew):
-    expected = {"ORB3-ANA": (74, "attention"), "ORB3-RAJ": (97, "stable"),
-                "ORB3-MIKA": (67, "attention"), "ORB3-LEO": (40, "alert")}
-    for crew_id, (score, label) in expected.items():
+    # Status tag of the app: >= 70 ok, 50-69 warn, < 50 alert.
+    expected = {"ORB3-ANA": (74, "ok", "stable"), "ORB3-RAJ": (97, "ok", "stable"),
+                "ORB3-MIKA": (67, "warn", "attention"), "ORB3-LEO": (40, "alert", "alert")}
+    for crew_id, (score, level, label) in expected.items():
         s = client.get("/api/v1/app/me/status", headers=crew(crew_id)).json()
-        assert (s["overallScore"], s["statusLabel"]) == (score, label), crew_id
+        assert (s["overallScore"], s["statusLevel"], s["statusLabel"]) == (score, level, label), crew_id
+        assert s["logsTotal"] == 6 and s["days"][-1]["statusLevel"] == level
         assert set(s["areas"]) == {"head", "torso", "armL", "armR", "legL", "legR"}
         assert len(s["days"]) == 7 and s["days"][-1]["missionDay"] == 12
 
@@ -59,7 +61,11 @@ def test_rule_alerts_and_orbi_notes(client, crew):
 def test_home(client, crew):
     h = client.get("/api/v1/app/me/home", headers=crew("ORB3-ANA")).json()
     assert [i["module"] for i in h["logs"]] == ["mood", "sleep", "radiation", "meals", "exercise", "body", "relax"]
-    assert h["logsTotal"] == 7 and h["mission"]["missionDay"] == 12
+    assert h["logsTotal"] == 6 and h["mission"]["missionDay"] == 12
+    assert h["statusLevel"] == "ok"
+    by_module = {i["module"]: i for i in h["logs"]}
+    assert by_module["body"]["logTypes"] == ["measurement", "injury"] and by_module["meals"]["logTypes"] == ["meal"]
+    assert not by_module["relax"]["countsForTotal"]
     assert h["orbi"]["types"][0] == "poor_sleep"
     assert h["avatarState"] == "sleepy"
 

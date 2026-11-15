@@ -21,6 +21,7 @@ CATEGORIES: dict[str, str] = {
     "metabolism": "Metabolism",
     "inflammation": "Inflammation & acute phase",
     "vascular": "Vascular & endothelial",
+    "cytokines": "Cytokines & immune signaling (research)",
     "other": "Other",
 }
 
@@ -39,6 +40,7 @@ UNIT_SLUGS: dict[str, str] = {
     "milliliter_per_minute_per_1.73_meter_squared": "mL/min/1.73m²",
     "nanogram_per_milliliter": "ng/mL",
     "picogram_per_milliliter": "pg/mL",
+    "npq": "NPQ (log2)",
 }
 
 
@@ -135,8 +137,36 @@ def readable_unit(slug: str | None) -> str:
     return UNIT_SLUGS.get(slug, slug.replace("_per_", "/").replace("_", " "))
 
 
-def describe(code: str, unit_slug: str | None) -> tuple[AnalyteInfo, str]:
+GREEK = {"alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "lambda": "λ"}
+
+NPQ_NOTE = (
+    "NULISA Protein Quantification: a log2-scale relative abundance (+1 NPQ is about twice as much). "
+    "Changes are compared in NPQ units, not percent."
+)
+
+
+def protein_name(code: str) -> str:
+    """Readable name for a cytokine/protein code: il_1ra -> IL-1RA, tnfα -> TNFα, ifna1;ifna13 -> IFNA1/IFNA13."""
+    def word(p: str) -> str:
+        if p in GREEK:
+            return GREEK[p]
+        # Upper-case Latin letters only; Greek letters already in the code stay lower-case (tnfα -> TNFα).
+        return "".join(ch.upper() if ch.isascii() else ch for ch in p)
+
+    names = []
+    for alt in code.split(";"):
+        parts = [word(p) for p in alt.split("_") if p]
+        name = ""
+        for p in parts:
+            name += p if not name or p in GREEK.values() else "-" + p
+        names.append(name)
+    return "/".join(n for n in names if n)
+
+
+def describe(code: str, unit_slug: str | None, default_category: str = "other",
+             protein: bool = False) -> tuple[AnalyteInfo, str]:
     """Return catalog info and the display unit for an analyte code."""
-    info = CATALOG.get(code) or AnalyteInfo(code.replace("_", " ").capitalize(), "other")
+    fallback = protein_name(code) if protein else code.replace("_", " ").capitalize()
+    info = CATALOG.get(code) or AnalyteInfo(fallback, default_category)
     unit = info.unit_override or readable_unit(unit_slug)
     return info, unit

@@ -10,9 +10,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.deps import require_care_team
-from app.cosmo import logic, views
+from app.cosmo import logic, nutrition, telemetry, views
 from app.cosmo.models import AppAlert, AppAstronaut, AppEnvironmentReading, AppGroundMessage, AppLog
-from app.cosmo.schemas import AlertOut, DailySummaryOut, GroundMessageOut, GroundReplyIn, LogOut
+from app.cosmo.schemas import (
+    AlertOut,
+    DailySummaryOut,
+    GroundMessageOut,
+    GroundReplyIn,
+    LogOut,
+    PlanBulkIn,
+    PlanDayIn,
+)
 from app.cosmo.service import astronaut_logs, evaluate, message_status, send_message
 from app.db import get_db
 from app.models import User, utcnow
@@ -40,7 +48,7 @@ def _astronaut(db: Session, astronaut_id: str) -> AppAstronaut:
 def crew(db: Session = Depends(get_db)):
     m, day = _mission(db)
     rows = []
-    for a in db.scalars(select(AppAstronaut).order_by(AppAstronaut.id)):
+    for a in db.scalars(select(AppAstronaut).where(AppAstronaut.role != "test").order_by(AppAstronaut.id)):
         logs = astronaut_logs(db, a.id)
         ev = evaluate(db, a, day, m, logs)
         moods = sorted((l for l in logs if l.type == "mood" and l.mission_day <= day), key=lambda l: (l.mission_day, l.timestamp))
@@ -53,7 +61,12 @@ def crew(db: Session = Depends(get_db)):
             AppGroundMessage.read_at.is_(None))) if message_status(g) == "delivered"]
         rows.append({
             "astronaut": {"id": a.id, "name": a.name, "crewId": a.crew_id},
-            "overallScore": ev.score, "statusLabel": ev.label, "logsToday": len(ev.logs_done),
+            "overallScore": ev.score, "statusLevel": ev.status_level, "statusLabel": ev.label,
+            "logsToday": len(ev.logs_done), "logsTotal": len(logic.COUNTED_TYPES),
+            "nutritionPlanPct": ev.domains["nutrition"].detail.get("planPct"),
+            "lastSyncAt": telemetry._iso(telemetry.last_sync(db, a.id)),
+            "pendingConfirmations": telemetry.pending_count(db, a.id),
+            "vitals": telemetry.latest_vitals(db, a.id),
             "areas": ev.areas,
             "mood": {"level": moods[-1].data["level"], "label": moods[-1].data["label"],
                      "missionDay": moods[-1].mission_day} if moods else None,
@@ -88,7 +101,7 @@ def sleep(db: Session = Depends(get_db)):
     m, day = _mission(db)
     days = list(range(max(1, day - 6), day + 1))
     out = []
-    for a in db.scalars(select(AppAstronaut).order_by(AppAstronaut.id)):
+    for a in db.scalars(select(AppAstronaut).where(AppAstronaut.role != "test").order_by(AppAstronaut.id)):
         by_day = defaultdict(int)
         for l in astronaut_logs(db, a.id):
             if l.type == "sleep" and l.mission_day in days:
@@ -144,6 +157,91 @@ def astronaut_logs_endpoint(astronaut_id: str, type: str | None = None,
     if to_day is not None:
         stmt = stmt.where(AppLog.mission_day <= to_day)
     return [views.log_out(l) for l in db.scalars(stmt.order_by(AppLog.mission_day.desc(), AppLog.timestamp.desc()))]
+
+
+def _plan_rows(db: Session, meals) -> list[dict]:
+    """Turn the request meals into rows: nutrition as sent, or computed from catalog foods."""
+    rows = []
+    for meal in meals:
+        if meal.foods:
+            try:
+                total, foods = nutrition.nutrition_of(db, [(f.food_id, f.servings) for f in meal.foods])
+            except KeyError as exc:
+                raise HTTPException(422, f"Unknown foodId {exc.args[0]!r}; see GET /api/v1/app/foods") from None
+            names = [f.name for f in foods]
+            rows.append({"slot": meal.slot, "time": meal.time or nutrition.SLOT_TIME[meal.slot],
+                         "name": meal.name or " + ".join(names[:2]), "items": meal.items or names, **total})
+        else:
+            rows.append({"slot": meal.slot, "time": meal.time or nutrition.SLOT_TIME[meal.slot], "name": meal.name,
+                         "items": meal.items, "kcal": meal.kcal, "protein_g": meal.protein_g or 0,
+                         "carbs_g": meal.carbs_g or 0, "fat_g": meal.fat_g or 0})
+    return rows
+
+
+def _check_day(m, day: int) -> None:
+    if not 1 <= day <= m.length_days:
+        raise HTTPException(422, f"day must be between 1 and {m.length_days}")
+
+
+@router.get("/astronauts/{astronaut_id}/meal-plan", summary="Meal plan of one astronaut on a day, with adherence")
+def get_meal_plan(astronaut_id: str, day: int | None = Query(None, ge=1), db: Session = Depends(get_db)):
+    m, today = _mission(db)
+    return views.meal_plan(db, _astronaut(db, astronaut_id), min(day or today, m.length_days))
+
+
+@router.put("/astronauts/{astronaut_id}/meal-plan/{day}", summary="Set the menu of one mission day (replaces it)")
+def put_meal_plan(astronaut_id: str, day: int, body: PlanDayIn, db: Session = Depends(get_db)):
+    m, _ = _mission(db)
+    a = _astronaut(db, astronaut_id)
+    _check_day(m, day)
+    nutrition.set_day(db, a.id, day, _plan_rows(db, body.meals))
+    db.commit()
+    return views.meal_plan(db, a, day)
+
+
+@router.post("/astronauts/{astronaut_id}/meal-plan", status_code=201,
+             summary="Set several days at once, or seed the default menu for a range of days")
+def post_meal_plan(astronaut_id: str, body: PlanBulkIn, db: Session = Depends(get_db)):
+    m, _ = _mission(db)
+    a = _astronaut(db, astronaut_id)
+    days = []
+    if body.seed:
+        first, last = body.from_day or 1, body.to_day or m.length_days
+        _check_day(m, first), _check_day(m, last)
+        if first > last:
+            raise HTTPException(422, "fromDay must not be after toDay")
+        nutrition.seed_default_plan(db, a.id, first, last)
+        days += list(range(first, last + 1))
+    for d in body.days:  # explicit days win over the seeded ones
+        _check_day(m, d.day)
+        nutrition.set_day(db, a.id, d.day, _plan_rows(db, d.meals))
+        days.append(d.day)
+    db.commit()
+    days = sorted(set(days))
+    return {"astronautId": a.id, "days": days, "count": len(days), "seeded": body.seed}
+
+
+@router.get("/astronauts/{astronaut_id}/telemetry", summary="Device readings of one astronaut, with a summary per metric")
+def astronaut_telemetry(astronaut_id: str, metric: str | None = None, hours: int = Query(24, ge=1, le=24 * 30),
+                        limit: int = Query(500, ge=1, le=5000), db: Session = Depends(get_db)):
+    from app.routers.app_me import telemetry_view
+
+    a = _astronaut(db, astronaut_id)
+    return telemetry_view(db, a.id, metric, hours, limit) | {"sync": telemetry.sync_status(db, a)}
+
+
+@router.get("/confirmations", summary="Orbi confirmations of the crew: pending, answered checks, confirmed readings")
+def crew_confirmations(astronaut_id: str | None = Query(None, alias="astronautId"),
+                       status: str = Query("all", description="pending | answered | confirmed | corrected | dismissed | all"),
+                       db: Session = Depends(get_db)):
+    from app.cosmo.models import AppConfirmation
+
+    stmt = select(AppConfirmation)
+    if astronaut_id:
+        stmt = stmt.where(AppConfirmation.astronaut_id == astronaut_id)
+    if status != "all":
+        stmt = stmt.where(AppConfirmation.status == status)
+    return [telemetry.confirmation_out(c) for c in db.scalars(stmt.order_by(AppConfirmation.created_at.desc()).limit(500))]
 
 
 @router.get("/messages", response_model=list[GroundMessageOut], summary="Message threads (urgent and unread first)")

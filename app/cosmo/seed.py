@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth.security import hash_password
 from app.config import SEED_DIR, Settings
-from app.cosmo import logic
+from app.cosmo import logic, nutrition, telemetry
 from app.cosmo.models import (
     AppAlert,
     AppAstronaut,
     AppCalendarEvent,
+    AppChatMessage,
+    AppDeviceReading,
+    AppFood,
+    AppPlanMeal,
     AppEnvironmentReading,
     AppGroundMessage,
     AppJournalEntry,
@@ -108,3 +112,76 @@ def seed_if_empty(session: Session, settings: Settings) -> bool:
     session.commit()
     log.info("Loaded the CosmoMedic demo data (%s, %d logs)", mission.id, len(db["logs"]))
     return True
+
+
+# --- data added after the first release: applied on every start, only where missing --------------
+
+EXTRA_WINDOWS = [
+    ("window-beach", "Beach", 400),
+    ("window-field", "Countryside", 350),
+    ("window-mountains", "Mountains", 450),
+    ("window-city", "City lights", 500),
+]
+TEST_ASTRONAUT_ID = "ast-test"
+TEST_CREW_ID = "TEST"
+TEST_COINS = 999_999
+GROUND_CREW_ID = "GROUND"
+
+
+def _ensure_user(session: Session, username: str, name: str, role: str, astronaut_id: str | None, pin: str) -> None:
+    if session.scalar(select(User).where(User.username == username)) is None:
+        session.add(User(username=username, display_name=name, role=role, astronaut_id=astronaut_id,
+                         password_hash=hash_password(pin)))
+
+
+def ensure_extras(session: Session, settings: Settings) -> None:
+    """Idempotent: shop windows, TEST astronaut, GROUND user, Orbi chat history, food catalog, meal plans."""
+    mission = logic.mission(session)
+    if mission is None:
+        return
+    db = json.loads(MOCK_DB.read_text(encoding="utf-8"))
+
+    for item_id, name, price in EXTRA_WINDOWS:
+        if session.get(AppShopItem, item_id) is None:
+            session.add(AppShopItem(id=item_id, category="window", name=name, price=price,
+                                    asset=f"assets/shop/{item_id}.png"))
+
+    # Test account: every shop item is affordable, onboarding already done. Kept out of the crew table and ranking.
+    if session.get(AppAstronaut, TEST_ASTRONAUT_ID) is None:
+        template = db["astronauts"][0]
+        session.add(AppAstronaut(
+            id=TEST_ASTRONAUT_ID, mission_id=mission.id, name="Test Pilot", crew_id=TEST_CREW_ID, role="test",
+            profile=template["profile"], baseline=template["baseline"], devices=template["devices"],
+            avatar={**template["avatar"], "name": "Bolt", "coins": TEST_COINS}, onboarding_done=True,
+        ))
+        session.flush()
+    _ensure_user(session, TEST_CREW_ID.lower(), "Test Pilot", "astronaut", TEST_ASTRONAUT_ID, settings.app_test_pin)
+    # Mission Control account for the ground dashboard, through the same Crew ID + PIN login.
+    _ensure_user(session, GROUND_CREW_ID.lower(), "Mission Control", "medical", None, settings.app_ground_pin)
+
+    if not session.scalar(select(func.count()).select_from(AppChatMessage)):
+        for msg in db["ai_chat"].get("messages", []):
+            session.add(AppChatMessage(id=msg["id"], astronaut_id=msg["astronautId"], author=msg["author"],
+                                       text=msg["text"], timestamp=ts(msg["timestamp"]),
+                                       mode=msg.get("mode", "journal"), source="seed"))
+
+    for food_id, name, serving, kcal, protein, carbs, fat in nutrition.FOODS:
+        if session.get(AppFood, food_id) is None:
+            session.add(AppFood(id=food_id, name=name, serving_g=serving, kcal=kcal, protein_g=protein,
+                                carbs_g=carbs, fat_g=fat))
+    session.flush()
+
+    # Simulated device sync (last 24 h) so the Health Overview has data; real devices replace it.
+    if not session.scalar(select(func.count()).select_from(AppDeviceReading)):
+        day = logic.today(session, mission)
+        now = datetime.now(timezone.utc)
+        for astronaut in session.scalars(select(AppAstronaut).where(AppAstronaut.role != "test")):
+            for device, items in telemetry.simulate(astronaut, day, now).items():
+                telemetry.ingest(session, astronaut, day, "simulator", device, items, simulated=True)
+
+    for astronaut in session.scalars(select(AppAstronaut)):
+        has_plan = session.scalar(select(func.count()).select_from(AppPlanMeal)
+                                  .where(AppPlanMeal.astronaut_id == astronaut.id))
+        if not has_plan:
+            nutrition.seed_default_plan(session, astronaut.id, 1, mission.length_days)
+    session.commit()

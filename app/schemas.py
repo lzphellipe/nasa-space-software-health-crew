@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import Field, BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
 from app.provenance import REAL
@@ -217,6 +217,10 @@ class Overview(APIModel):
     timepoints: list[TimepointStatus]
     crew: list[CrewMemberOut]
     last_ingest: IngestRunOut | None
+    research_panels: list[dict] = Field(
+        default_factory=list,
+        description="Research panels (immune cytokine arrays): stored and queryable, not counted above",
+    )
     provenance: str = REAL
 
 

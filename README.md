@@ -19,8 +19,17 @@ The real data comes from the SpaceX **Inspiration4** mission (3 days in low Eart
 | `cbc` | [OSD-569](https://osdr.nasa.gov/bio/repo/data/studies/OSD-569) | `LSDS-7_Complete_Blood_Count_CBC_TRANSFORMED.csv` | Complete blood count, 20 analytes, whole blood |
 | `cmp` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Comprehensive_Metabolic_Panel_CMP_TRANSFORMED.csv` | Metabolic panel, 19 analytes, serum |
 | `cardio` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Multiplex_serum_cardiovascular_EvePanel_TRANSFORMED.csv` | Multiplex cardiovascular panel, 9 analytes, serum |
+| `immune` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Multiplex_serum_immune_EvePanel_TRANSFORMED.csv` | **Research:** immune cytokine array (Eve HD71), 71 analytes, pg/mL, serum |
+| `alamar` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Multiplex_serum.immune.AlamarPanel_TRANSFORMED.csv` | **Research:** inflammation panel (Alamar NULISAseq), 203 proteins, NPQ (log2), serum |
 
-Total: 84 samples, 48 analytes, 1,344 measurements.
+Clinical panels: 84 samples, 48 analytes, 1,344 measurements. Research panels: 55 samples (28 Eve, 27 Alamar: C003 has no L-44), 274 analytes, 7,469 measurements.
+
+**Research panels** (`immune`, `alamar`) are hundreds of proteins without clinical reference ranges. They are stored and fully queryable (`/analytes?panel=`, `/measurements?panel=`, `/crew/{id}/measurements?panel=`, `/crew/{id}/analytes/{code}/series`, `/dashboard/heatmap?panel=`, the CSV export), but **left out of the crew status, summaries, alerts and the overview counts**, so they do not drown the 48 clinical analytes. The overview lists them in `researchPanels`.
+
+- Alamar codes are prefixed `alamar_` (e.g. `alamar_il6`): EGF, LIF and TSLP are measured by both arrays.
+- Alamar values are NPQ, a log2 scale (+1 NPQ is about twice as much). `deltaAbs` is in NPQ, `deltaPct` is the fold change, `(2^deltaAbs − 1) × 100`, and `watch` needs |deltaAbs| ≥ 1 (2-fold) and |z| ≥ 2.
+- None of the OSD-575 serum panels has in-flight samples: only L-92, L-44, L-3 and R+1…R+194.
+- A database created by an older version gets new datasets on the next start; unchanged files are skipped by their SHA-256.
 
 The download URL is resolved through the study file listing (`/osdr/data/osd/files/<n>`), with the documented `geode-py` URL as fallback; the download redirects to a signed S3 URL. A copy of each file ships in `app/seed/`, so the API also starts offline (`INGEST_SOURCE=auto` falls back to it automatically).
 
@@ -32,7 +41,7 @@ uvicorn app.main:app --reload            # http://localhost:8000/docs
 pytest
 ```
 
-On first start the database is empty, so the API ingests the three OSDR files and the two AGBRESA files (from NASA and PLOS, or the bundled copies if they are unreachable) and generates the synthetic mission. Data lands in `data/crew_health.db` (SQLite).
+On first start the database is empty, so the API ingests the five OSDR files and the two AGBRESA files (from NASA and PLOS, or the bundled copies if they are unreachable) and generates the synthetic mission. Data lands in `data/crew_health.db` (SQLite).
 
 On Windows, if port 8000 is blocked (`WinError 10013`), use another one: `uvicorn app.main:app --reload --port 8080`.
 
@@ -43,6 +52,226 @@ docker compose up --build                # API on :8000, Postgres on the interna
 ```
 
 To run the tests against PostgreSQL: `TEST_DATABASE_URL=postgresql+psycopg://user@host:5432/empty_db pytest`.
+
+## CosmoMedic app (`/api/v1/app`)
+
+The CosmoMedic frontend (React Native app + ground web dashboard) has its own data model, `docs/data/data-model.json`, and demo data, `docs/data/mock-db.json`. The API loads that demo data into its own tables (`app_*`) on first start and serves every screen in that exact format, so the app can swap its mock for the API without changing its types. The backend computes what the mock had frozen: daily score, body areas, alerts, Orbi notes, coins, "logged today", message status.
+
+- **Crew:** Ana Souza `ast-01` (`ORB3-ANA`), Raj Patel `ast-02` (`ORB3-RAJ`), Mika Tanaka `ast-03` (`ORB3-MIKA`), Leo Martins `ast-04` (`ORB3-LEO`), with the profile, baseline, avatar, coins, items and history of `mock-db.json`. PIN `2026` for all four (`APP_DEMO_PIN`).
+- **Test account:** Crew ID `TEST`, PIN `0000` (`APP_TEST_PIN`): 999,999 coins to try the whole shop, onboarding already done, no logs. It is `ast-test` and stays out of the ground crew table and of the ranking.
+- **Mission Control:** Crew ID `GROUND`, PIN `2026` (`APP_GROUND_PIN`), through the same login. It sees `/api/v1/app/ground/*`.
+- **Mission:** Orbit-3, low Earth orbit, 30 days, today is **day 12** (`APP_MISSION_DAY`: empty = the mission's own day, a number, or `auto` = days since `startDate`). Communication delay 1,200 s (20 min) each way.
+- **Ground team:** the care-team accounts (`surgeon` and `admin`) also see `/api/v1/app/ground/*`, through `/api/v1/auth/login` or the app login. Astronauts get 403 there; each astronaut only sees their own data under `/api/v1/app/me`.
+
+### Login
+
+```http
+POST /api/v1/app/auth/login
+{"crewId": "ORB3-ANA", "pin": "2026"}
+→ {"accessToken": "…", "tokenType": "bearer", "expiresIn": 1800,
+   "refreshToken": "…", "refreshExpiresIn": 2592000, "role": "astronaut",
+   "astronaut": {"id": "ast-01", "name": "Ana Souza", "crewId": "ORB3-ANA", "onboardingDone": true}, "next": "/home"}
+```
+
+- The access token lasts 30 minutes. Renew it with `POST /api/v1/auth/refresh {"refreshToken": "…"}`: it returns a new pair, and the refresh token used is no longer valid (keep the newest one). The refresh token lasts 30 days.
+- `role` is `astronaut` or `ground`. For `GROUND`, `astronaut` is `null` and `next` is `/ground`.
+
+### Endpoints
+
+| Screen | Method and route |
+|---|---|
+| Login | `POST /app/auth/login` |
+| Onboarding, profile, devices | `GET /app/me/profile` · `POST /app/me/onboarding` · `PATCH /app/me/devices` |
+| Home (x/6 logs, coins, status tag, Orbi note, unread messages) | `GET /app/me/home` |
+| Crew status (score, 7-day scrubber, body areas, callouts) | `GET /app/me/status?day=` |
+| Daily summaries | `GET /app/me/summaries?fromDay=&toDay=` |
+| Save / edit / list logs | `POST /app/me/logs` · `PUT /app/me/logs/{id}` · `GET /app/me/logs?type=&fromDay=&toDay=` |
+| Module overview (mood, sleep, radiation, body, meals, exercise, relax) | `GET /app/me/logs/{module}/overview` |
+| Alerts | `GET /app/me/alerts?status=active\|resolved\|all` |
+| Orbi notes | `GET /app/me/orbi-notes` · `POST /app/me/orbi-notes/{id}/read\|dismiss` |
+| Notification preferences (opt-out) | `GET`/`PUT /app/me/preferences` |
+| Message Mission Control | `GET`/`POST /app/me/ground-messages` · `POST /app/me/ground-messages/{id}/read` |
+| Chat with Orbi | `POST /app/me/orbi/chat` · `GET /app/me/orbi/messages` |
+| Device sync (wearable, cuff, dosimeter, EVA suit) | `POST /app/me/telemetry` · `POST /app/me/telemetry/simulate` · `GET /app/me/telemetry` · `GET /app/me/devices/status` · `GET /app/telemetry/metrics` |
+| Orbi confirmations (confirm a reading, quick checks) | `GET /app/me/confirmations` · `POST /app/me/confirmations/{id}/confirm\|answer\|dismiss` |
+| Uploads (voice note, injury photo) | `POST /app/me/uploads` · `GET /app/uploads/{name}` |
+| Meal plan, food catalog | `GET /app/me/meal-plan?day=` · `GET /app/foods?q=` |
+| Avatar, shop | `GET`/`PUT /app/me/avatar` · `POST /app/me/avatar/purchase` · `POST /app/me/avatar/equip` · `GET /app/shop` |
+| Leaderboard | `GET /app/leaderboard?by=logs\|coins` |
+| Calendar, journal | `GET /app/me/calendar` · `GET /app/me/journal` |
+| Mission | `GET /app/mission` |
+| **Ground dashboard** | `GET /app/ground/crew` · `/alerts?minLevel=` · `/sleep` · `/environment` · `/astronauts/{id}/status\|summaries\|logs\|meal-plan` · `GET`/`POST /messages` · `POST /messages/{id}/read` |
+
+All routes start with `/api/v1`.
+
+### Saving a log
+
+`POST /api/v1/app/me/logs` takes the `type` and a `data` object in the frontend format; validation errors only refer to that type. The server sets `missionDay`, `coinsEarned` (+10, meditation 0, plus the streak bonus), computed fields (`label`, `durationMin`, `doseUsv`, `cadence`, `deltaVsBaselinePct`, `flaggedToGround`), recomputes the alerts and, when allowed, writes an Orbi note.
+
+```jsonc
+{"type": "mood", "data": {"level": 4, "tags": ["calm"]}}
+{"type": "sleep", "environmentId": "sleep", "data": {"bedtime": "2026-11-14T00:40:00Z", "wakeTime": "2026-11-14T06:50:00Z", "quality": 3, "wakeUps": "1-2", "source": "manual"}}
+{"type": "radiation", "data": {"value": 41, "unit": "uSv", "source": "personal"}}
+{"type": "measurement", "data": {"metric": "blood_pressure", "values": {"systolic": 118, "diastolic": 76, "pulse": 62}}}
+{"type": "measurement", "data": {"metric": "bone_density", "values": {"value": 1.18}}}
+{"type": "injury", "data": {"bodyPart": "knee", "side": "left", "kind": "strain", "severity": "severe", "pain": 4, "description": "…"}}
+{"type": "exercise", "environmentId": "lab", "data": {"modality": "aerobic", "equipment": "treadmill", "durationMin": 45, "effort": 3}}
+```
+
+Response: `{"log": {…}, "coins": 1260, "coinsEarned": 10, "loggedToday": true, "alerts": [new or escalated alerts], "supportRequestId": null, "message": "Log saved to your mission record · +10 mission coins"}`. A **severe injury** opens an urgent request in the care team's support queue (`/api/v1/care/support`) and returns its id.
+
+### Device telemetry and Orbi confirmations
+
+Wearable + EVA telemetry → Orbi → the astronaut reviews and confirms; the medical team follows the trends. The phone reads the devices (Health Connect on Android, HealthKit on iPhone, Bluetooth Low Energy for other sensors) and sends the readings in batches; the suit sends EVA telemetry. **There is no hardware in the prototype:** `POST /app/me/telemetry/simulate` makes the same readings, labelled `SIMULATED_TELEMETRY`. Readings from real devices are `DEVICE_MEASURED`. Every crew member starts with 24 simulated hours, so the Health Overview has data.
+
+```http
+POST /api/v1/app/me/telemetry
+{"source": "health_connect", "device": "wrist_band", "readings": [
+  {"metric": "heart_rate", "measuredAt": "2026-11-15T13:30:00Z", "value": 64},
+  {"metric": "spo2", "measuredAt": "2026-11-15T13:30:00Z", "value": 97},
+  {"metric": "sleep_session", "measuredAt": "2026-11-15T06:30:00Z",
+   "values": {"bedtime": "2026-11-15T00:55:00Z", "wakeTime": "2026-11-15T06:30:00Z", "avgHr": 55, "awakenings": 2}}]}
+→ 201 {"accepted": 3, "duplicates": 0, "byMetric": {…}, "confirmations": [ …what Orbi will ask… ],
+       "sync": {"lastSyncAt": "…", "devices": [ … ], "pendingConfirmations": 1}, "provenance": "DEVICE_MEASURED"}
+```
+
+- Metrics (`GET /app/telemetry/metrics`): `heart_rate`, `resting_heart_rate`, `hrv`, `spo2`, `body_temperature`, `respiratory_rate`, `sleep_session`, `blood_pressure`, `radiation_dose`, and during an EVA `eva_heart_rate`, `eva_suit_pressure`, `eva_co2`, `eva_metabolic_rate`. Out-of-range values are rejected (422, with the index of each bad reading). Resending a batch is safe: same metric, device and time are skipped.
+- `POST /app/me/telemetry/simulate {"hours": 24, "eva": false, "anomaly": "none"}`; `anomaly` is `low_spo2`, `fever`, `high_heart_rate`, `eva_co2` or `eva_pressure`, to demo a quick check.
+- **Readings never become logs by themselves.** Orbi asks (`GET /app/me/confirmations`):
+  - `kind: "log"`: a sleep session, blood pressure or dosimeter dose that is not logged today. `question` says what was measured; `proposed` is the log in the app format. `POST …/confirm` saves it as is, or with `{"correction": {"quality": 2}}` (+10 coins, the same as typing it, with the device's provenance). `POST …/dismiss` discards it.
+  - `kind: "check"`: a value outside its usual range: SpO2 < 92%, temperature ≥ 37.8 °C, breathing > 24/min, resting heart rate ≥ 120, EVA heart rate ≥ 160, suit CO2 ≥ 8 mmHg, suit pressure < 27.5 kPa. One quick question, one per metric per day. `POST …/answer {"answer": "ok"}` or `{"answer": "not_ok", "symptoms": ["shortness_of_breath"]}`: "not OK" creates a `device_check` alert sent to the ground and a support request (urgent for SpO2 and EVA checks). Thresholds are illustrative.
+- **Health Overview:** `GET /app/me/home` adds `sync` (last sync, minutes since, devices), `vitals` (latest heart rate, SpO2, temperature, breathing, HRV) and `pendingConfirmations`.
+- **Ground:** `ground/crew` adds `lastSyncAt`, `pendingConfirmations` and `vitals`; `GET /app/ground/astronauts/{id}/telemetry?metric=&hours=` and `GET /app/ground/confirmations?astronautId=&status=`.
+
+### Module names and log types
+
+The home screen lists modules; logs are saved by type. Each home item carries its `logTypes`.
+
+| Home module | Log `type` | Counts for `logsTotal` |
+|---|---|---|
+| `mood` | `mood` | yes |
+| `sleep` | `sleep` | yes |
+| `radiation` | `radiation` | yes |
+| `meals` | `meal` | yes |
+| `exercise` | `exercise` | yes |
+| `body` | `measurement` (and `injury`) | yes (`measurement`) |
+| `relax` | `meditation` | no ("coming soon") |
+
+### Coins
+
++10 per saved log (meditation 0; edits give nothing). **Streak bonus:** the first mood check-in of the day that completes 7 days in a row (also 14, 21…) gives +50 more, so `coinsEarned` is 60 and the response has `bonus: {"type": "mood_streak_7", "coins": 50, "streak": 7}`.
+
+### Chat with Orbi
+
+```http
+POST /api/v1/app/me/orbi/chat
+{"text": "I slept badly again", "mode": "journal"}        // mode: journal | private
+→ {"reply": "Your last nights averaged 5.4 h (goal 7 h). …", "mode": "journal", "topic": "sleep", "saved": true,
+   "journalEntry": {"id": "jrn-…", "summary": "I slept badly again", "moodLevel": 2, "sourceMessageIds": ["msg-…", "msg-…"]},
+   "messages": [ …the two saved messages… ], "provenance": "RULE_DERIVED"}
+```
+
+- `journal` saves the message, the reply and a journal entry (also listed in `GET /app/me/journal` and in the mood overview). `private` saves **nothing**: `journalEntry` is `null` and the history does not change.
+- `GET /app/me/orbi/messages` returns the history, oldest first: `{id, astronautId, author: orbi | astronaut, text, timestamp, mode}`.
+- **Replies are rule-based** (keywords plus the day's summary: sleep, exercise, nutrition), labelled `RULE_DERIVED`. There is no language model in this service; one can replace `app/cosmo/orbi.py` behind the same route, and must label its output `AI_GENERATED`. Messages about self-harm or urgent symptoms are answered by pointing to the flight surgeon and Mission Control.
+
+### Uploads: voice note and injury photo
+
+```http
+POST /api/v1/app/me/uploads        (multipart, field "file")
+→ 201 {"url": "https://…/api/v1/app/uploads/3f2a….m4a", "path": "/api/v1/app/uploads/3f2a….m4a",
+       "contentType": "audio/mp4", "sizeBytes": 48211, "kind": "audio"}
+```
+
+Use the `url` in `voiceNote` of a mood log, `{"type": "mood", "data": {"level": 3, "voiceNote": {"url": "…", "durationSec": 12.5, "transcript": "…"}}}`, or in `photoUrl` of an injury. Audio (m4a, aac, mp3, wav, webm, ogg, 3gp) and images (jpg, png, webp, heic), up to 10 MB (`UPLOAD_MAX_MB`), stored in `UPLOAD_DIR`. Files get a random name and `GET /app/uploads/{name}` needs no token, so **whoever has the url can open the file**; use signed urls or private storage outside a demo.
+
+### Meal plan
+
+The medical team sets the menu of each mission day, with its nutrition. The astronaut only marks each planned meal.
+
+- `GET /app/me/meal-plan?day=12`: `{missionDay, meals: [{id, slot, time, name, items, kcal, proteinG, carbsG, fatG, logged}], totals, eatenKcal, eatenPct, loggedMeals}`. `logged` is `null` or `{logId, adherence, eatenPct, kcal}`.
+- `GET /app/foods?q=rice`: station catalog for swaps, `{id, name, servingG, kcal, proteinG, carbsG, fatG}` per serving.
+- Ground: `PUT /app/ground/astronauts/{id}/meal-plan/{day}` replaces one day with `{"meals": [...]}`; `POST /app/ground/astronauts/{id}/meal-plan` takes `{"days": [{"day": 13, "meals": [...]}]}` and/or `{"seed": true, "fromDay": 1, "toDay": 30}` (default 3-day rotation); `GET` on the same path shows a day with the adherence. A meal is `{slot, time?, name, items, kcal, proteinG, carbsG, fatG}` or `{slot, foods: [{foodId, servings}]}` (nutrition computed). One meal per slot: `breakfast`, `lunch`, `dinner`, `snack`.
+- Every astronaut starts with the default menu for the 30 days (about 2,500 kcal a day). The catalog and the menu are illustrative.
+
+Logging a meal (`POST /app/me/logs`, `type: "meal"`). The API computes `kcal` and the macros; `name` and `tasteRating` are optional:
+
+```jsonc
+{"type": "meal", "data": {"planMealId": "pm-ast-01-d12-breakfast", "adherence": "followed"}}
+{"type": "meal", "data": {"planMealId": "pm-ast-01-d12-lunch", "adherence": "partial", "eatenPct": 50, "tasteRating": 2}}
+{"type": "meal", "data": {"planMealId": "pm-ast-01-d12-snack", "adherence": "swapped", "swaps": [{"foodId": "food-rice", "servings": 2}]}}
+{"type": "meal", "data": {"planMealId": "pm-ast-01-d12-dinner", "adherence": "skipped"}}
+{"type": "meal", "data": {"swaps": [{"foodId": "food-brownie", "servings": 1}]}}   // outside the plan
+{"type": "meal", "data": {"name": "Crew pizza night", "kcal": 700}}                 // outside the plan, old format
+```
+
+- `followed` = 100% of the planned meal, `partial` = `eatenPct`, `swapped` = the sum of the swaps, `skipped` = 0. A planned meal is logged once (409 after that; edit it with `PUT /app/me/logs/{id}`).
+- The nutrition summary reports the share of the plan eaten: `planPct` and `planText` ("82% of plan") in the meals overview, in the home detail of `meals` and as `nutritionPlanPct` in `ground/crew`.
+
+### How the summaries and alerts are computed
+
+Rules look at the last 7 mission days (thresholds in `app/cosmo/logic.py`):
+
+| Domain | Warn | Alert | Body area |
+|---|---|---|---|
+| Mood | average of the last 3 check-ins ≤ 2.6, or stress tags on 3 days | ≤ 1.7 | head |
+| Sleep | last 3 nights < 6 h on average, or 3 short nights | < 5 h | head |
+| Blood pressure | ≥ 130/85 | ≥ 140/90 | torso |
+| Muscle (strength or mass vs pre-flight baseline) | ≤ −5% | ≤ −10% | left arm |
+| Bone density | ≤ −1.0% | ≤ −1.5% | legs |
+| Fitness (aerobic vs baseline; days with ≥ 60 min) | ≤ −8%; < 55% of days | ≤ −10%; < 30% | legs |
+| Radiation* (today vs own average) | > 1.5× | > 2× | right arm |
+| Nutrition (intake vs goal; menu fatigue) | < 65% | < 50% | torso |
+| Injury | moderate or active | severe | the injured area |
+
+- **Score** = 80% health (100 minus 5 per warn and 10 per alert) + 20% completeness (logs done today out of 6).
+- **Status tag:** `statusLevel` is `ok` (score ≥ 70), `warn` (50–69) or `alert` (< 50), in home, status, summaries and `ground/crew`. `statusLabel` follows it (`stable`, `attention`, `alert`).
+- **Daily logs:** `logsTotal` is 6: mood, sleep, radiation, meals, exercise and body. Relax/meditation ("coming soon") and injuries do not count.
+- **Alerts** follow the frontend types (`poor_sleep`, `low_mood`, `fitness_drop`, `bone_loss`, `menu_fatigue`, `injury`); `medium` and `high` are sent to the ground. Alerts from the mock are kept unless the rules escalate them; rule alerts that stop firing are resolved.
+- **Orbi notes:** at most one every 7 mission days, only for `medium`/`high` alerts, always with the opt-out line; `PUT /app/me/preferences {"proactiveMessages": false}` turns them off. A `high` alert also opens a routine support request.
+- **Messages:** each message gets `estimatedArrivalAt = sentAt + commDelaySec`. Status: `in_transit` → `delivered` → `read`. Ground replies only appear in the astronaut's thread once they arrive.
+- **Radiation is illustrative** (`illustrative: true`): NASA sets no fixed daily limit for long missions.
+
+With the demo data on day 12: Ana 74 `ok` (poor sleep alert), Raj 97 `ok`, Mika 67 `warn` (low mood, menu fatigue), Leo 40 `alert` (poor sleep, low mood, fitness, knee injury).
+
+Provenance: logs and messages from the mock are `SIMULATED_TELEMETRY`, those sent from the app `USER_REPORTED`; scores, areas, rule alerts and Orbi notes are `RULE_DERIVED`; device readings, and logs confirmed from them, are `DEVICE_MEASURED` (or `SIMULATED_TELEMETRY` when the simulator made them).
+
+### Data provenance
+
+Every item has a `provenance` and every response an `X-Data-Provenance` header; `GET /api/v1/provenance` lists the types, sources and routes.
+
+| `provenance` | Meaning |
+|---|---|
+| `REAL_RESEARCH_DATA` | measured in published studies (OSDR Inspiration4, AGBRESA) |
+| `SIMULATED_TELEMETRY` | generated by this project: synthetic mission, CosmoMedic demo data, device simulator |
+| `USER_REPORTED` | typed in by the astronaut |
+| `RULE_DERIVED` | computed by documented rules, no AI |
+| `REFERENCE_DOCUMENT` | text from the PDF knowledge base |
+| `AI_GENERATED` | reserved for a language model; this API never emits it |
+| `DEVICE_MEASURED` | sent by a paired wearable, cuff, dosimeter or EVA suit |
+
+### Replacing the mock in the frontend
+
+```ts
+const API = "http://192.168.0.10:8000/api/v1/app";
+
+export async function crewLogin(crewId: string, pin: string) {
+  const res = await fetch(`${API}/auth/login`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ crewId, pin }),
+  });
+  if (!res.ok) throw new Error("Invalid Crew ID or PIN");
+  return res.json(); // { accessToken, astronaut, next }
+}
+
+const get = (path: string, token: string) =>
+  fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json());
+
+// const { accessToken, refreshToken } = await crewLogin("ORB3-ANA", "2026");
+// const home = await get("/me/home", accessToken);
+// const sleep = await get("/me/logs/sleep/overview", accessToken);
+// await fetch(`${API}/me/logs`, { method: "POST", headers: {...}, body: JSON.stringify({ type: "mood", data: { level: 4, tags: [] } }) });
+```
 
 ## Crew monitoring
 
@@ -382,6 +611,10 @@ studies (AGBRESA) ─< source_files ─< analog_observations >─ analog_subject
 
 users   astronaut_preferences   checkins   pattern_detections   proactive_messages   support_requests
 knowledge_documents ─< knowledge_chunks
+
+app_missions ─< app_astronauts ─< app_logs, app_alerts, app_ground_messages, app_journal, app_calendar,
+                                  app_chat_messages, app_meal_plan
+app_shop_items   app_environment_readings   app_foods   (CosmoMedic)
 ```
 
 ### Endpoints (OSDR)
@@ -509,7 +742,7 @@ GitHub Actions (`.github/workflows/tests.yml`) runs the test suite on every push
 
 ## Configuration
 
-See `.env.example`. Main variables: `DATABASE_URL`, `JWT_SECRET`, `SEED_DEMO_USERS`, `DEMO_PASSWORD`, `CURRENT_MISSION_DAY`, `SCHEDULER_ENABLED`, `DETECTION_INTERVAL_MINUTES`, `PROACTIVE_MIN_INTERVAL_DAYS`, `SUPPORT_WEBHOOK_URL`, `INGEST_SOURCE`, `CORS_ORIGINS`, `ADMIN_API_KEY`, `SYNTHETIC_SEED`.
+See `.env.example`. Main variables: `DATABASE_URL`, `JWT_SECRET`, `SEED_DEMO_USERS`, `DEMO_PASSWORD`, `CURRENT_MISSION_DAY`, `SCHEDULER_ENABLED`, `DETECTION_INTERVAL_MINUTES`, `PROACTIVE_MIN_INTERVAL_DAYS`, `SUPPORT_WEBHOOK_URL`, `INGEST_SOURCE`, `CORS_ORIGINS`, `ADMIN_API_KEY`, `SYNTHETIC_SEED`, `APP_SEED_ON_STARTUP`, `APP_MISSION_DAY`, `APP_DEMO_PIN`, `APP_TEST_PIN`, `APP_GROUND_PIN`, `UPLOAD_DIR`, `UPLOAD_MAX_MB`.
 
 ## Limitations
 
@@ -519,7 +752,8 @@ See `.env.example`. Main variables: `DATABASE_URL`, `JWT_SECRET`, `SEED_DEMO_USE
 - **AGBRESA is an analog.** Bed rest reproduces some effects of microgravity (fluid shift, deconditioning) in healthy volunteers on Earth; it is not spaceflight, and these are not the Inspiration4 crew. Do not join it with the other data sets as if it described the same people.
 - **Synthetic mission.** The daily vitals are generated, not measured. Effects follow published orders of magnitude for long ISS stays, but the individual curves, events and thresholds are illustrative. Use the data to build and evaluate the agent and the apps, not to draw physiological conclusions.
 - **Four people, seven timepoints.** The baseline uses three samples per person; z-scores are indicative, not statistical tests.
-- **Multiplex panel.** Research-assay concentrations with no clinical reference range; the `relativePercent` column is passed through as reported. These analytes only ever get `watch` or `normal`, and vary a lot between pre-flight samples (e.g. CRP).
+- **Multiplex panels.** Research-assay concentrations with no clinical reference range; the `relativePercent` column is passed through as reported. These analytes only ever get `watch` or `normal`, and vary a lot between pre-flight samples (e.g. CRP). With three baseline samples and hundreds of proteins, some `watch` values in the research panels are expected by chance.
+- **Device telemetry is simulated** in the prototype, and its quick-check thresholds are illustrative screening values, not medical criteria.
 - **eGFR** is reported with the race-based equations used by the lab at the time; current practice (CKD-EPI 2021) no longer uses race.
 - Tables are created with `create_all`; add Alembic migrations before changing the schema in a shared deployment.
 
@@ -536,10 +770,11 @@ app/
   analog/            AGBRESA files, metric definitions, xlsx parser and decoding
   auth/              password hashing, JWT, role and per-astronaut access checks
   knowledge/         bundled PDF (NASA-STD-3001 Vol. 1 Rev. C)
+  cosmo/             CosmoMedic app layer: tables, schemas, rules (score, areas, alerts), Orbi chat rules, meal plan, device telemetry and confirmations, seed
   synthetic/         metric definitions, generator, check-in catalog and history, assessment; `python -m app.synthetic`
   services/          ingestion, analytics, synthetic store, patterns, proactive messages, support, monitoring cycle, PDF search, users
-  routers/           auth, me, care, crew, dashboard, missions, analog, knowledge, catalog, ingest
-  seed/              bundled copies of the three OSDR files and the two AGBRESA files
+  routers/           auth, me, care, crew, dashboard, missions, analog, knowledge, catalog, ingest, provenance, app_public, app_me, app_ground
+  seed/              bundled copies of the five OSDR files, the two AGBRESA files and the CosmoMedic data (cosmomedic/)
 samples/             synthetic_daily_vitals.csv and its ground-truth events
-tests/               parsers, download clients (mocked), API end-to-end, synthetic data, AGBRESA, monitoring and access control
+tests/               parsers, download clients (mocked), API end-to-end, synthetic data, AGBRESA, monitoring, access control, provenance, CosmoMedic app, device telemetry, OSD-575 immune panels
 ```

@@ -11,7 +11,15 @@ from sqlalchemy.orm import Session
 from app.cosmo import logic
 from app.cosmo.models import AppAlert, AppAstronaut, AppGroundMessage, AppJournalEntry, AppLog, AppMission, AppShopItem
 from app.cosmo.schemas import AlertOut, DailySummaryOut, GroundMessageOut, LogOut
-from app.cosmo.service import alert_provenance, astronaut_logs, evaluate, log_provenance, message_status
+from app.cosmo import nutrition, telemetry
+from app.cosmo.service import (
+    alert_provenance,
+    astronaut_logs,
+    evaluate,
+    log_provenance,
+    message_status,
+    plan_kcal_by_day,
+)
 from app.models import ProactiveMessage
 from app.provenance import SIMULATED, USER
 
@@ -49,7 +57,8 @@ def message_out(m: AppGroundMessage) -> GroundMessageOut:
 def summary_out(ev: logic.DayEvaluation) -> DailySummaryOut:
     return DailySummaryOut(
         astronaut_id=ev.astronaut_id, mission_day=ev.day, logs_done=ev.logs_done, logs_done_count=len(ev.logs_done),
-        logs_total=len(logic.COUNTED_TYPES), overall_score=ev.score, status_label=ev.label, areas=ev.areas,
+        logs_total=len(logic.COUNTED_TYPES), overall_score=ev.score, status_level=ev.status_level,
+        status_label=ev.label, areas=ev.areas,
         domains={k: v.level for k, v in ev.domains.items()},
     )
 
@@ -111,7 +120,8 @@ def measurements_state(astronaut: AppAstronaut, logs: list[AppLog], day: int) ->
     return rows
 
 
-def module_detail(module: str, astronaut: AppAstronaut, logs: list[AppLog], day: int, goals: dict) -> str:
+def module_detail(module: str, astronaut: AppAstronaut, logs: list[AppLog], day: int, goals: dict,
+                  plan_kcal: float = 0) -> str:
     today_logs = _day_logs(logs, day, MODULES[module]["types"])
     if module == "mood" and today_logs:
         last = today_logs[-1].data
@@ -124,6 +134,8 @@ def module_detail(module: str, astronaut: AppAstronaut, logs: list[AppLog], day:
         return f"{total:g} μSv · {'personal dosimeter' if today_logs[-1].data['source'] == 'personal' else 'area monitor'}"
     if module == "meals":
         kcal = sum(l.data["kcal"] for l in today_logs)
+        if plan_kcal:
+            return f"{kcal:,.0f} of {plan_kcal:,.0f} kcal planned · {round(kcal / plan_kcal * 100)}% of plan"
         return f"{kcal:,.0f} of {goals.get('kcalPerDay', 2500):,} kcal"
     if module == "exercise":
         minutes = sum(l.data["durationMin"] for l in today_logs)
@@ -159,15 +171,17 @@ def home(session: Session, astronaut: AppAstronaut, m: AppMission, day: int) -> 
     logs = astronaut_logs(session, astronaut.id)
     ev = evaluate(session, astronaut, day, m, logs)
     note = latest_orbi_note(session, astronaut.id)
+    plan = plan_kcal_by_day(session, astronaut.id)
     unread = [g for g in session.scalars(select(AppGroundMessage).where(
         AppGroundMessage.astronaut_id == astronaut.id, AppGroundMessage.sender == "ground",
         AppGroundMessage.read_at.is_(None))) if message_status(g) == "delivered"]
     items = []
     for key, cfg in MODULES.items():
         done = module_done(key, logs, day)
-        items.append({"module": key, "title": cfg["title"], "route": cfg["route"], "done": done,
+        items.append({"module": key, "logTypes": cfg["types"], "countsForTotal": key != "relax",
+                      "title": cfg["title"], "route": cfg["route"], "done": done,
                       "status": "Explore" if key == "relax" else "Done" if done else "Log now",
-                      "detail": module_detail(key, astronaut, logs, day, m.goals),
+                      "detail": module_detail(key, astronaut, logs, day, m.goals, plan.get(day, 0)),
                       "comingSoon": cfg.get("comingSoon", False)})
     return {
         "astronaut": {"id": astronaut.id, "name": astronaut.name, "firstName": astronaut.name.split()[0],
@@ -179,11 +193,16 @@ def home(session: Session, astronaut: AppAstronaut, m: AppMission, day: int) -> 
         "logsDoneCount": len(ev.logs_done),
         "logsTotal": len(logic.COUNTED_TYPES),
         "overallScore": ev.score,
+        "statusLevel": ev.status_level,
         "statusLabel": ev.label,
         "avatarState": logic.avatar_state(ev),
         "orbi": ({"id": note.id, "title": note.title, "text": note.body.split("\n\n")[0], "types": note.patterns}
                  if note else None),
         "unreadGroundMessages": len(unread),
+        # Health Overview: device sync, latest vitals and what Orbi is waiting to confirm.
+        "sync": telemetry.sync_status(session, astronaut),
+        "vitals": telemetry.latest_vitals(session, astronaut.id),
+        "pendingConfirmations": telemetry.pending_count(session, astronaut.id),
         "provenance": "RULE_DERIVED",
     }
 
@@ -233,7 +252,8 @@ def status(session: Session, astronaut: AppAstronaut, m: AppMission, day: int) -
          "logged": bool(bone), "value": pct(bone.data.get("deltaVsBaselinePct")) if bone else "—"},
     ]
     return {
-        "astronautId": astronaut.id, "missionDay": day, "overallScore": ev.score, "statusLabel": ev.label,
+        "astronautId": astronaut.id, "missionDay": day, "overallScore": ev.score,
+        "statusLevel": ev.status_level, "statusLabel": ev.label,
         "logsDoneCount": len(ev.logs_done), "logsTotal": len(logic.COUNTED_TYPES),
         "streak": streak(logs, day), "areas": ev.areas, "domains": {k: v.level for k, v in dom.items()},
         "callouts": callouts, "days": days, "coins": astronaut.avatar.get("coins", 0),
@@ -300,7 +320,11 @@ def overview(session: Session, astronaut: AppAstronaut, m: AppMission, day: int,
         week = [{"missionDay": d, "kcal": sum(l.data["kcal"] for l in _day_logs(logs, d, ["meal"])) or None}
                 for d in week_days]
         nut = ev.domains["nutrition"].detail
+        plan_today = meal_plan(session, astronaut, day, logs)
+        out["plan"] = plan_today
         out["stats"] = {"kcalToday": kcal_today, "goalKcal": goals.get("kcalPerDay", 2500), "macrosToday": macros,
+                        "planKcalToday": plan_today["totals"]["kcal"], "planPctToday": plan_today["eatenPct"],
+                        "planPct": nut.get("planPct"), "planText": nut.get("planText"),
                         "week": week, "averageTaste": nut.get("avgTaste"), "menuFatigue": nut.get("menuFatigue", False),
                         "mostRepeatedMeal": nut.get("mostRepeatedMeal"), "level": ev.domains["nutrition"].level}
     elif module == "exercise":
@@ -327,8 +351,32 @@ def overview(session: Session, astronaut: AppAstronaut, m: AppMission, day: int,
     return out
 
 
+def meal_plan(session: Session, astronaut: AppAstronaut, day: int, logs: list[AppLog] | None = None) -> dict:
+    """The planned meals of a day, each with what the astronaut logged for it, and the share of the plan eaten."""
+    logs = logs if logs is not None else astronaut_logs(session, astronaut.id)
+    day_logs = [l for l in logs if l.type == "meal" and l.mission_day == day]
+    by_plan = {l.data.get("planMealId"): l for l in sorted(day_logs, key=lambda l: l.timestamp) if l.data.get("planMealId")}
+    meals = []
+    totals = dict.fromkeys(("kcal", "proteinG", "carbsG", "fatG"), 0.0)
+    for pm in nutrition.day_plan(session, astronaut.id, day):
+        row = nutrition.plan_meal_out(pm)
+        log = by_plan.get(pm.id)
+        row["logged"] = ({"logId": log.id, "adherence": log.data.get("adherence"), "eatenPct": log.data.get("eatenPct"),
+                          "kcal": log.data.get("kcal")} if log else None)
+        meals.append(row)
+        for k in totals:
+            totals[k] += row[k]
+    eaten = sum(l.data.get("kcal", 0) for l in day_logs)
+    return {"astronautId": astronaut.id, "missionDay": day, "meals": meals,
+            "totals": {k: round(v, 1) for k, v in totals.items()},
+            "eatenKcal": round(eaten, 1),
+            "eatenPct": round(eaten / totals["kcal"] * 100) if totals["kcal"] else None,
+            "loggedMeals": sum(1 for r in meals if r["logged"]), "provenance": SIMULATED}
+
+
 def leaderboard(session: Session, by: str, me: str | None) -> list[dict]:
-    astronauts = session.scalars(select(AppAstronaut)).all()
+    # The TEST account stays out of the ranking, except in its own view.
+    astronauts = [a for a in session.scalars(select(AppAstronaut)) if a.role != "test" or a.id == me]
     counts = Counter(l.astronaut_id for l in session.scalars(select(AppLog)))
     value = (lambda a: counts.get(a.id, 0)) if by == "logs" else (lambda a: a.avatar.get("coins", 0))
     ranked = sorted(astronauts, key=lambda a: (-value(a), a.name))

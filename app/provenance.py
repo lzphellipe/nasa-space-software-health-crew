@@ -18,12 +18,14 @@ class Provenance(str, Enum):
     RULE_DERIVED = "RULE_DERIVED"
     REFERENCE_DOCUMENT = "REFERENCE_DOCUMENT"
     AI_GENERATED = "AI_GENERATED"
+    DEVICE_MEASURED = "DEVICE_MEASURED"
 
 
 REAL = Provenance.REAL_RESEARCH_DATA.value
 SIMULATED = Provenance.SIMULATED_TELEMETRY.value
 USER = Provenance.USER_REPORTED.value
 DERIVED = Provenance.RULE_DERIVED.value
+DEVICE = Provenance.DEVICE_MEASURED.value
 DOCUMENT = Provenance.REFERENCE_DOCUMENT.value
 AI = Provenance.AI_GENERATED.value
 
@@ -60,6 +62,12 @@ TYPES = [
         "label": "AI generated",
         "description": "Reserved for content written by a language model (the AI agent). "
                        "This API never produces it; the agent must label its own output with it.",
+    },
+    {
+        "code": DEVICE,
+        "label": "Measured by a device",
+        "description": "Sent by a paired wearable, cuff, dosimeter or EVA suit through the phone "
+                       "(Health Connect, HealthKit, Bluetooth). Simulated readings are SIMULATED_TELEMETRY instead.",
     },
 ]
 
@@ -140,6 +148,16 @@ SOURCES = [
 
 # Longest prefix first. The header lists every kind of data a route returns.
 ROUTES: list[tuple[str, list[str]]] = [
+    ("/api/v1/app/me/telemetry", [DEVICE, SIMULATED]),
+    ("/api/v1/app/me/devices", [DEVICE, SIMULATED]),
+    ("/api/v1/app/me/confirmations", [DEVICE, SIMULATED, USER]),
+    ("/api/v1/app/telemetry", [DEVICE, SIMULATED]),
+    ("/api/v1/app/ground/confirmations", [DEVICE, SIMULATED, USER]),
+    ("/api/v1/app/me/orbi/", [USER, SIMULATED, DERIVED]),
+    ("/api/v1/app/me/uploads", [USER]),
+    ("/api/v1/app/uploads", [USER]),
+    ("/api/v1/app/foods", [SIMULATED]),
+    ("/api/v1/app/me/meal-plan", [SIMULATED, USER]),
     ("/api/v1/app/me/logs", [USER, SIMULATED, DERIVED]),
     ("/api/v1/app/me/ground-messages", [USER, SIMULATED]),
     ("/api/v1/app/me", [USER, SIMULATED, DERIVED]),

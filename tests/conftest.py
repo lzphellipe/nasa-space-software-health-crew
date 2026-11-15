@@ -9,6 +9,7 @@ _TMP = Path(tempfile.mkdtemp(prefix="crew-health-test-"))
 os.environ["DATABASE_URL"] = os.getenv("TEST_DATABASE_URL", f"sqlite:///{_TMP / 'test.db'}")
 os.environ["INGEST_SOURCE"] = "bundled"
 os.environ["RAW_CACHE_DIR"] = str(_TMP / "raw")
+os.environ["UPLOAD_DIR"] = str(_TMP / "uploads")
 os.environ.pop("ADMIN_API_KEY", None)
 os.environ["SCHEDULER_ENABLED"] = "false"
 os.environ["JWT_SECRET"] = "test-secret-" + "x" * 40

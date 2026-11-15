@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
+from app.osdr.datasets import RESEARCH_PANELS
 from app.models import Analyte, CrewMember, Measurement, Timepoint
 from app.osdr.analytes import CATEGORIES
 from app.schemas import (
@@ -80,8 +81,13 @@ def filtered_query(
     analyte: str | None = None,
     status: str | None = None,
     flag: str | None = None,
+    include_research: bool = False,
 ) -> Select:
+    """Research panels (immune cytokine arrays) are left out unless asked for by panel or analyte,
+    or with include_research=True."""
     q = base_query()
+    if not (include_research or panel or analyte):
+        q = q.where(Analyte.panel.not_in(RESEARCH_PANELS))
     if crew_id:
         q = q.where(Measurement.crew_id == crew_id)
     if timepoint:
@@ -154,8 +160,11 @@ def get_analyte_or_404(session: Session, code: str) -> Analyte:
 
 
 def status_by_crew(session: Session, timepoint: str) -> dict[str, list[str]]:
+    """Statuses of the clinical panels only (research panels do not set a crew member's status)."""
     result: dict[str, list[str]] = defaultdict(list)
-    q = select(Measurement.crew_id, Measurement.status).where(Measurement.timepoint_code == timepoint)
+    q = (select(Measurement.crew_id, Measurement.status)
+         .join(Analyte, Measurement.analyte_code == Analyte.code)
+         .where(Measurement.timepoint_code == timepoint, Analyte.panel.not_in(RESEARCH_PANELS)))
     for crew_id, status in session.execute(q):
         result[crew_id].append(status)
     return result
@@ -212,8 +221,11 @@ def overall(statuses: Iterable[str]) -> str:
     return worst_status(statuses)
 
 
-def measurement_count(session: Session) -> int:
-    return session.scalar(select(func.count()).select_from(Measurement)) or 0
+def measurement_count(session: Session, research: bool = False) -> int:
+    """Clinical measurements by default; research=True counts the research panels instead."""
+    panels = Analyte.panel.in_(RESEARCH_PANELS) if research else Analyte.panel.not_in(RESEARCH_PANELS)
+    q = select(func.count()).select_from(Measurement).join(Analyte, Measurement.analyte_code == Analyte.code).where(panels)
+    return session.scalar(q) or 0
 
 
 def timepoint_out(t: Timepoint) -> TimepointOut:
