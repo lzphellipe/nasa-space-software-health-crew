@@ -94,6 +94,7 @@ POST /api/v1/app/auth/login
 | Chat with Orbi | `POST /app/me/orbi/chat` · `GET /app/me/orbi/messages` |
 | Device sync (wearable, cuff, dosimeter, EVA suit) | `POST /app/me/telemetry` · `POST /app/me/telemetry/simulate` · `GET /app/me/telemetry` · `GET /app/me/devices/status` · `GET /app/telemetry/metrics` |
 | Orbi confirmations (confirm a reading, quick checks) | `GET /app/me/confirmations` · `POST /app/me/confirmations/{id}/confirm\|answer\|dismiss` |
+| Orbi reflection (journal + numbers) and consultation | `GET /app/me/orbi/reflection?ai=` · `POST`/`GET /app/me/consultations` · ground: `GET /app/ground/astronauts/{id}/reflection` · `GET /app/ground/consultations` |
 | Offline: local copy, queue upload, changes | `GET /app/me/offline-bundle` · `POST /app/me/sync` · `GET /app/me/changes?since=` · `GET /app/me/sync/ops` |
 | Whole local database in the frontend format (mock-db.json shape) | `GET /app/snapshot` |
 | Uploads (voice note, injury photo) | `POST /app/me/uploads` · `GET /app/uploads/{name}` |
@@ -144,6 +145,16 @@ POST /api/v1/app/me/telemetry
   - `kind: "check"`: a value outside its usual range: SpO2 < 92%, temperature ≥ 37.8 °C, breathing > 24/min, resting heart rate ≥ 120, EVA heart rate ≥ 160, suit CO2 ≥ 8 mmHg, suit pressure < 27.5 kPa. One quick question, one per metric per day. `POST …/answer {"answer": "ok"}` or `{"answer": "not_ok", "symptoms": ["shortness_of_breath"]}`: "not OK" creates a `device_check` alert sent to the ground and a support request (urgent for SpO2 and EVA checks). Thresholds are illustrative.
 - **Health Overview:** `GET /app/me/home` adds `sync` (last sync, minutes since, devices), `vitals` (latest heart rate, SpO2, temperature, breathing, HRV) and `pendingConfirmations`.
 - **Ground:** `ground/crew` adds `lastSyncAt`, `pendingConfirmations` and `vitals`; `GET /app/ground/astronauts/{id}/telemetry?metric=&hours=` and `GET /app/ground/confirmations?astronautId=&status=`.
+
+### Orbi reflection and consultation suggestion
+
+`GET /app/me/orbi/reflection` reads the journal of the last 7 mission days (journal mode only; private chats are never stored) together with the same days' logs and device readings, area by area (sleep, mood and stress, pain or injury, food, exercise):
+
+- `links[]`: `consistent` (the journal and the numbers both point to a problem), `journal_only` (written about, not in the numbers yet) or `numbers_only` (flagged by the numbers, not mentioned), with the journal days, the numbers and the evidence ids.
+- `consultation`: whether Orbi suggests a medical consultation, with `reasons[]` and `priority`. **Decided by rules, not by the language model:** a journal entry about self-harm or urgent symptoms (urgent; the message says to talk to the flight surgeon or a crewmate now), a device check answered "not OK", an active high alert, two or more areas in alert, or the same problem in the journal and the numbers on 2+ days. Thresholds are illustrative.
+- `narrative`: a short text. With `ORBI_AI_ENABLED=true` and `GROQ_API_KEY`, a language model words it from journal summaries and numbers (no names), and the answer says `aiGenerated: true` and `X-Data-Provenance` ends with `AI_GENERATED`; otherwise it is built from the rules. Answers with medical advice are dropped.
+
+The astronaut decides: `POST /app/me/consultations {"confirmed": true, "note": "..."}` opens a support request for the flight surgeon with Orbi's reasons (one open at a time; also as `consultation.request` in the offline queue, and with `Idempotency-Key`). The ground team sees it in `GET /app/ground/consultations`, in `consultation` of each `ground/crew` row and in `/api/v1/care/support`, and answers with `PATCH /api/v1/care/support/{id}`. `GET /app/me/home` has `consultationSuggestion` (rules only), and the offline bundle carries the reflection.
 
 ### Offline use and communication delay
 

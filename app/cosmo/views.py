@@ -203,8 +203,19 @@ def home(session: Session, astronaut: AppAstronaut, m: AppMission, day: int) -> 
         "sync": telemetry.sync_status(session, astronaut),
         "vitals": telemetry.latest_vitals(session, astronaut.id),
         "pendingConfirmations": telemetry.pending_count(session, astronaut.id),
+        # Orbi reads the journal with the numbers; this says whether it suggests a consultation.
+        "consultationSuggestion": _consultation_badge(session, astronaut, m, day),
         "provenance": "RULE_DERIVED",
     }
+
+
+def _consultation_badge(session: Session, astronaut: AppAstronaut, m: AppMission, day: int) -> dict:
+    from app.cosmo import reflection
+
+    c = reflection.build(session, astronaut, m, day, ai=False)["consultation"]
+    return {"suggested": c["suggested"], "priority": c["priority"], "message": c["message"],
+            "reasons": [r["code"] for r in c["reasons"]], "existingRequest": c["existingRequest"],
+            "details": "/api/v1/app/me/orbi/reflection"}
 
 
 def status(session: Session, astronaut: AppAstronaut, m: AppMission, day: int) -> dict:
