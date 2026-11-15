@@ -31,7 +31,7 @@ def test_header(client, path, expected):
 
 def test_only_the_orbi_insight_routes_claim_ai_generated():
     claimed = [prefix for prefix, values in ROUTES if Provenance.AI_GENERATED.value in values]
-    assert claimed == ["/api/v1/orbi"]
+    assert sorted(claimed) == ["/api/v1/app/me/orbi/reflection", "/api/v1/orbi"]
 
 
 def test_item_level_values(client, auth):

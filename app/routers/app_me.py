@@ -8,7 +8,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import Field, TypeAdapter, ValidationError
 from sqlalchemy import select
@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.deps import get_current_user
 from app.config import get_settings
-from app.cosmo import logic, nutrition, offline, orbi, telemetry, views
+from app.cosmo import logic, nutrition, offline, orbi, reflection, telemetry, views
 from app.cosmo.models import (
     AppAlert,
     AppAstronaut,
@@ -434,6 +434,67 @@ def orbi_chat(body: OrbiChatIn, astronaut: AppAstronaut = Depends(current_astron
                            "summary": entry.summary, "moodLevel": entry.mood_level,
                            "sourceMessageIds": entry.source_message_ids}
     return out
+
+
+# --- Orbi reflection (journal + numbers) and the consultation it can suggest --------------------
+
+
+@router.get("/orbi/reflection", summary="Orbi reads your journal with your logs and readings; may suggest a consultation")
+def orbi_reflection(response: Response, ai: bool = Query(True, description="Let a language model word the text (when enabled)"),
+                    astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
+    """Journal entries of the last 7 mission days (journal mode only) lined up with the same days'
+    numbers, per area: `consistent` (both point to a problem), `journal_only`, `numbers_only`.
+    `consultation.suggested` comes from rules; asking for it needs `POST /app/me/consultations`.
+    """
+    m, day = mission_day(db)
+    out = reflection.build(db, astronaut, m, day, ai=ai)
+    response.headers["X-Data-Provenance"] = reflection.header(out)
+    return out
+
+
+class ConsultationIn(APIModel):
+    confirmed: bool = Field(description="The astronaut agreed to ask for the consultation")
+    note: str | None = Field(None, max_length=1000, description="What the astronaut wants to talk about")
+
+
+def request_consultation(db: Session, astronaut: AppAstronaut, body: ConsultationIn) -> dict:
+    if not body.confirmed:
+        raise HTTPException(422, "Confirm to request the consultation")
+    m, day = mission_day(db)
+    view = reflection.build(db, astronaut, m, day, ai=False)
+    c = view["consultation"]
+    reasons = "; ".join(r["text"] for r in c["reasons"]) or "astronaut request"
+    message = ("Consultation requested from the CosmoMedic app."
+               + (f" Astronaut's note: {body.note.strip()}" if body.note and body.note.strip() else "")
+               + f" Orbi's reasons: {reasons}")
+    req = open_request(db, astronaut_id=astronaut.id, mission_id=astronaut.mission_id, mission_day=day,
+                       reason=reflection.CONSULTATION_REASON, detail=reflection.CONSULTATION_DETAIL,
+                       topic="medical", priority=c["priority"], message=message[:4000])
+    db.commit()
+    return {"requestId": req.id, "status": req.status, "priority": req.priority, "missionDay": req.mission_day,
+            "suggestedByOrbi": c["suggested"], "reasons": c["reasons"],
+            "message": "Consultation requested. The flight surgeon will reply through Mission Control "
+                       f"(Earth is about {round(m.comm_delay_sec / 60)} minutes away).",
+            "provenance": "USER_REPORTED"}
+
+
+@router.post("/consultations", status_code=201, summary="Ask for a medical consultation (after Orbi's suggestion or not)")
+def ask_consultation(body: ConsultationIn, idempotency_key: str | None = IDEMPOTENCY_KEY,
+                     astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
+    """One open consultation at a time: asking again returns the open one."""
+    if idempotency_key is None:
+        return JSONResponse(request_consultation(db, astronaut, body), status_code=201)
+    return JSONResponse(offline.once(db, astronaut, idempotency_key, "consultation.request", None,
+                                     lambda: (None, request_consultation(db, astronaut, body))), status_code=201)
+
+
+@router.get("/consultations", summary="My consultation requests, newest first")
+def my_consultations(astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
+    rows = db.scalars(select(SupportRequest).where(SupportRequest.astronaut_id == astronaut.id,
+                                                   SupportRequest.reason == reflection.CONSULTATION_REASON)
+                      .order_by(SupportRequest.id.desc()))
+    return [{"requestId": r.id, "status": r.status, "priority": r.priority, "missionDay": r.mission_day,
+             "response": r.response, "createdAt": views.iso(r.created_at)} for r in rows]
 
 
 # --- uploads (voice note of the mood check-in, injury photo) ----------------------------------

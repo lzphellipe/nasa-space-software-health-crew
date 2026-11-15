@@ -5,12 +5,12 @@ from __future__ import annotations
 import statistics
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.deps import require_care_team
-from app.cosmo import logic, nutrition, offline, telemetry, views
+from app.cosmo import logic, nutrition, offline, reflection, telemetry, views
 from app.cosmo.models import AppAlert, AppAstronaut, AppEnvironmentReading, AppGroundMessage, AppLog, AppSyncOp
 from app.cosmo.schemas import (
     AlertOut,
@@ -23,7 +23,7 @@ from app.cosmo.schemas import (
 )
 from app.cosmo.service import astronaut_logs, evaluate, message_status, send_message
 from app.db import get_db
-from app.models import User, utcnow
+from app.models import SupportRequest, User, utcnow
 
 router = APIRouter(prefix="/api/v1/app/ground", tags=["app: ground team"], dependencies=[Depends(require_care_team)])
 
@@ -69,6 +69,8 @@ def crew(db: Session = Depends(get_db)):
             "vitals": telemetry.latest_vitals(db, a.id),
             # How old this row can be: last contact of the app and of the devices (offline queue, comm delay).
             "link": offline.link(db, a, m),
+            # Open consultation request from the app, if any (asked by the astronaut, often after Orbi's suggestion).
+            "consultation": _consultation_row(db, a.id),
             "areas": ev.areas,
             "mood": {"level": moods[-1].data["level"], "label": moods[-1].data["label"],
                      "missionDay": moods[-1].mission_day} if moods else None,
@@ -230,6 +232,36 @@ def astronaut_telemetry(astronaut_id: str, metric: str | None = None, hours: int
 
     a = _astronaut(db, astronaut_id)
     return telemetry_view(db, a.id, metric, hours, limit) | {"sync": telemetry.sync_status(db, a)}
+
+
+def _consultation_row(db: Session, astronaut_id: str) -> dict | None:
+    r = reflection._open_request(db, astronaut_id)
+    return {"requestId": r.id, "status": r.status, "priority": r.priority, "missionDay": r.mission_day} if r else None
+
+
+@router.get("/astronauts/{astronaut_id}/reflection",
+            summary="Orbi's reading of one astronaut's journal with the numbers, and whether it suggests a consultation")
+def astronaut_reflection(response: Response, astronaut_id: str,
+                         ai: bool = Query(False, description="Ask a language model to word the text"),
+                         db: Session = Depends(get_db)):
+    """Journal summaries are shared with the medical team (journal mode); private chats are never stored."""
+    m, day = _mission(db)
+    out = reflection.build(db, _astronaut(db, astronaut_id), m, day, ai=ai)
+    response.headers["X-Data-Provenance"] = reflection.header(out)
+    return out
+
+
+@router.get("/consultations", summary="Consultation requests from the app, open first, with Orbi's reasons")
+def consultations(status: str = Query("open", description="open (not resolved) | all"), db: Session = Depends(get_db)):
+    stmt = select(SupportRequest).where(SupportRequest.reason == reflection.CONSULTATION_REASON,
+                                        SupportRequest.detail == reflection.CONSULTATION_DETAIL)
+    if status != "all":
+        stmt = stmt.where(SupportRequest.status != "resolved")
+    names = {a.id: a.name for a in db.scalars(select(AppAstronaut))}
+    rows = sorted(db.scalars(stmt), key=lambda r: (r.status == "resolved", r.priority != "urgent", -r.id))
+    return [{"requestId": r.id, "astronautId": r.astronaut_id, "name": names.get(r.astronaut_id), "status": r.status,
+             "priority": r.priority, "missionDay": r.mission_day, "message": r.message, "response": r.response,
+             "createdAt": views.iso(r.created_at), "updateWith": f"PATCH /api/v1/care/support/{r.id}"} for r in rows]
 
 
 @router.get("/astronauts/{astronaut_id}/sync", summary="Link with one astronaut's app: last contact and offline operations received")

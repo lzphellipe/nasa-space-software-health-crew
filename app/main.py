@@ -124,7 +124,8 @@ async def provenance_header(request: Request, call_next):
     """Tell every client which kinds of data a route returns (see GET /api/v1/provenance)."""
     response = await call_next(request)
     values = provenance.for_path(request.url.path)
-    if values:
+    # A route that knows exactly what it returned (e.g. text written by a model or not) sets the header itself.
+    if values and "x-data-provenance" not in response.headers:
         response.headers["X-Data-Provenance"] = ",".join(values)
     return response
 

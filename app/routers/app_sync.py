@@ -12,7 +12,7 @@ from pydantic import Field, TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.cosmo import nutrition, offline, orbi, telemetry, views
+from app.cosmo import nutrition, offline, orbi, reflection, telemetry, views
 from app.cosmo.models import AppAstronaut, AppChatMessage, AppFood, AppJournalEntry, AppLog, AppSyncOp
 from app.cosmo.schemas import AnswerIn, ConfirmIn, GroundMessageIn, LogIn, TelemetryIn
 from app.cosmo.service import astronaut_logs, evaluate, new_id
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/v1/app/me", tags=["app: offline"])
 class SyncOp(APIModel):
     op_id: str = Field(min_length=8, max_length=64, description="Id made by the app (UUID). Applied at most once.")
     type: Literal["log.create", "log.update", "telemetry", "confirmation.confirm", "confirmation.answer",
-                  "confirmation.dismiss", "message.send", "message.read", "chat.save"]
+                  "confirmation.dismiss", "message.send", "message.read", "chat.save", "consultation.request"]
     recorded_at: datetime | None = Field(None, description="When the astronaut did it, on the device clock")
     mission_day: int | None = Field(None, ge=1, description="log.create: mission day it belongs to (default: today)")
     target_id: str | None = Field(None, max_length=70, description="Log, confirmation or message id. For a log created "
@@ -135,6 +135,9 @@ def _run(db: Session, astronaut: AppAstronaut, op: SyncOp, recorded_at: datetime
         payload["attachments"] = [_resolve(db, astronaut, a, "log") for a in payload.get("attachments") or []]
         out = app_me.post_ground_message(db, astronaut, _validate(GroundMessageIn, payload))
         return out.id, _json(out)
+    if op.type == "consultation.request":
+        out = app_me.request_consultation(db, astronaut, _validate(app_me.ConsultationIn, op.payload))
+        return str(out["requestId"]), out
     if op.type == "chat.save":
         body = _validate(ChatSaveIn, op.payload)
         at = recorded_at or utcnow()
@@ -237,6 +240,7 @@ def offline_bundle(astronaut: AppAstronaut = Depends(current_astronaut), db: Ses
         "telemetryMetrics": [{"metric": s.code, "unit": s.unit, "label": s.label, "min": s.lo, "max": s.hi}
                              for s in telemetry.METRICS.values()],
         "rules": offline.rules(m),
+        "reflection": reflection.build(db, astronaut, m, today, ai=False),
         "orbi": offline.orbi_offline(astronaut, ev),
         "sync": {"endpoint": "/api/v1/app/me/sync", "changesEndpoint": "/api/v1/app/me/changes",
                  "maxOpsPerBatch": offline.MAX_OPS, "opTypes": offline.OP_TYPES,
