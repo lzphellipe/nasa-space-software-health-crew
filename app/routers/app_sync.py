@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,13 +12,14 @@ from pydantic import Field, TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.cosmo import nutrition, offline, telemetry, views
-from app.cosmo.models import AppAstronaut, AppFood, AppLog, AppSyncOp
+from app.cosmo import nutrition, offline, orbi, telemetry, views
+from app.cosmo.models import AppAstronaut, AppChatMessage, AppFood, AppJournalEntry, AppLog, AppSyncOp
 from app.cosmo.schemas import AnswerIn, ConfirmIn, GroundMessageIn, LogIn, TelemetryIn
-from app.cosmo.service import astronaut_logs, evaluate
+from app.cosmo.service import astronaut_logs, evaluate, new_id
 from app.db import get_db
 from app.routers import app_me
 from app.routers.app_me import current_astronaut, mission_day
+from app.models import utcnow
 from app.schemas import APIModel
 
 router = APIRouter(prefix="/api/v1/app/me", tags=["app: offline"])
@@ -27,7 +28,7 @@ router = APIRouter(prefix="/api/v1/app/me", tags=["app: offline"])
 class SyncOp(APIModel):
     op_id: str = Field(min_length=8, max_length=64, description="Id made by the app (UUID). Applied at most once.")
     type: Literal["log.create", "log.update", "telemetry", "confirmation.confirm", "confirmation.answer",
-                  "confirmation.dismiss", "message.send", "message.read"]
+                  "confirmation.dismiss", "message.send", "message.read", "chat.save"]
     recorded_at: datetime | None = Field(None, description="When the astronaut did it, on the device clock")
     mission_day: int | None = Field(None, ge=1, description="log.create: mission day it belongs to (default: today)")
     target_id: str | None = Field(None, max_length=70, description="Log, confirmation or message id. For a log created "
@@ -35,6 +36,15 @@ class SyncOp(APIModel):
     base_updated_at: datetime | None = Field(None, description="log.update: when the copy edited offline was fetched; "
                                                                "if the log changed on the server since, it is a conflict")
     payload: dict[str, Any] = Field(default_factory=dict, description="Body of the matching online route")
+
+
+class ChatSaveIn(APIModel):
+    """A journal-mode exchange with Orbi that happened on the device (Orbi's rules run in the app when offline)."""
+
+    text: str = Field(min_length=1, max_length=4000)
+    reply: str = Field(min_length=1, max_length=4000)
+    summary: str | None = Field(None, max_length=400, description="Journal line; default: made from the text")
+    mood_level: int | None = Field(None, ge=1, le=5)
 
 
 class SyncIn(APIModel):
@@ -125,6 +135,19 @@ def _run(db: Session, astronaut: AppAstronaut, op: SyncOp, recorded_at: datetime
         payload["attachments"] = [_resolve(db, astronaut, a, "log") for a in payload.get("attachments") or []]
         out = app_me.post_ground_message(db, astronaut, _validate(GroundMessageIn, payload))
         return out.id, _json(out)
+    if op.type == "chat.save":
+        body = _validate(ChatSaveIn, op.payload)
+        at = recorded_at or utcnow()
+        mine = AppChatMessage(id=new_id("msg"), astronaut_id=astronaut.id, author="astronaut", text=body.text.strip(),
+                              timestamp=at, mode="journal", source="app")
+        answer = AppChatMessage(id=new_id("msg"), astronaut_id=astronaut.id, author="orbi", text=body.reply.strip(),
+                                timestamp=at + timedelta(milliseconds=1), mode="journal", source="device")
+        entry = AppJournalEntry(id=new_id("jrn"), astronaut_id=astronaut.id, timestamp=at,
+                                summary=body.summary or orbi.journal_summary(body.text), mood_level=body.mood_level,
+                                source_message_ids=[mine.id, answer.id])
+        db.add_all([mine, answer, entry])
+        db.commit()
+        return entry.id, {"messageIds": [mine.id, answer.id], "journalEntryId": entry.id}
     message_id = _resolve(db, astronaut, op.target_id, "message")
     return message_id, _json(app_me.read_ground(message_id, astronaut, db))
 

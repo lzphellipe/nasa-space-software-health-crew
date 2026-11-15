@@ -13,7 +13,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from app import db, provenance
 from app.config import get_settings
 from app.routers import analog, auth, care, catalog, crew, dashboard, ingest, knowledge, me, missions
-from app.routers import app_ground, app_me, app_public, app_sync
+from app.routers import app_ground, app_me, app_public, app_snapshot, app_sync
 from app.routers import provenance as provenance_router
 from app.services.ingest import database_is_empty, missing_datasets, run_ingestion
 from app.cosmo.seed import ensure_extras as ensure_cosmo_extras
@@ -111,7 +111,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 for router in (
     auth.router, me.router, care.router, crew.router, dashboard.router, missions.router,
     analog.router, knowledge.router, catalog.router, ingest.router, provenance_router.router,
-    app_public.router, app_me.router, app_sync.router, app_ground.router,
+    app_public.router, app_me.router, app_sync.router, app_snapshot.router, app_ground.router,
 ):
     app.include_router(router)
 
