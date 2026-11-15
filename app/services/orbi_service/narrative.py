@@ -21,6 +21,54 @@ _CACHE: OrderedDict[str, dict] = OrderedDict()
 _LOCK = Lock()
 _STRIPES = [Lock() for _ in range(32)]
 
+# CrewAI is imported once, on first use. Importing it loads litellm, which attaches its own
+# log filters to the server's loggers (asyncio, uvicorn, httpx). On Azure those filters failed
+# inside every log call and the whole API stopped answering, so they are removed right after
+# the import: litellm keeps its filters on its own loggers only.
+_CREWAI_LOCK = Lock()
+_crewai = None
+_crewai_failed = False
+_SERVER_LOGGERS = ("", "asyncio", "uvicorn", "uvicorn.error", "uvicorn.access", "httpx", "httpcore", "backoff",
+                   "apscheduler.scheduler", "apscheduler.executors.default")
+LLM_TIMEOUT_SECONDS = float(os.getenv("ORBI_AI_TIMEOUT_SEC", "30"))
+
+
+def _from_litellm(item) -> bool:
+    return type(item).__module__.split(".")[0] == "litellm"
+
+
+def detach_litellm_log_filters() -> int:
+    """Remove litellm's filters from loggers (and their handlers) that litellm does not own."""
+    removed = 0
+    for name in _SERVER_LOGGERS:
+        log = logging.getLogger(name)
+        for owner in [log, *log.handlers]:
+            for f in [f for f in owner.filters if _from_litellm(f)]:
+                owner.removeFilter(f)
+                removed += 1
+    return removed
+
+
+def load_crewai():
+    """The crewai module, or None when it cannot be imported (the fallback text is used)."""
+    global _crewai, _crewai_failed
+    with _CREWAI_LOCK:
+        if _crewai is None and not _crewai_failed:
+            # Read by litellm when it is first imported: no redaction filters on other loggers.
+            os.environ.setdefault("LITELLM_DISABLE_REDACT_SECRETS", "true")
+            try:
+                import crewai
+                import litellm  # noqa: F401  (crewai loads it on the first LLM(); load it here, then clean up)
+
+                _crewai = crewai
+            except Exception:
+                _crewai_failed = True
+                logger.exception("CrewAI could not be imported; Orbi uses the statistical text")
+            finally:
+                detach_litellm_log_filters()
+        return _crewai
+
+
 MAX_RATE_LIMIT_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECONDS = 5.0
 MAX_RETRY_DELAY_SECONDS = 60.0
@@ -499,7 +547,10 @@ def generate_narrative(
             return result
 
         try:
-            from crewai import Agent, Crew, LLM, Process, Task
+            crewai = load_crewai()
+            if crewai is None:
+                raise RuntimeError("CrewAI is not available")
+            Agent, Crew, LLM, Process, Task = crewai.Agent, crewai.Crew, crewai.LLM, crewai.Process, crewai.Task
 
             agent = Agent(
                 role=(
@@ -526,6 +577,7 @@ def generate_narrative(
                 llm=LLM(
                     model=model,
                     temperature=0.2,
+                    timeout=LLM_TIMEOUT_SECONDS,
                 ),
                 verbose=False,
                 allow_delegation=False,
@@ -663,5 +715,8 @@ def generate_narrative(
                 "using fallback",
                 audience,
             )
+        finally:
+            # In case litellm was imported again during the call and re-attached its filters.
+            detach_litellm_log_filters()
 
     return result
