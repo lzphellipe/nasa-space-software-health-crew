@@ -10,6 +10,7 @@ fills it in. When the model is off, slow or gives an off-limits answer, the rule
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,14 +24,17 @@ SYSTEM = (
     "You are Orbi, the on-board wellness companion of an astronaut on a long space mission. Think about what the "
     "astronaut needs before you answer, then reply like a warm, attentive crewmate.\n"
     "- Reply in the same language the astronaut used. At most 70 words, usually 1 to 3 sentences.\n"
-    "- When greeted, greet back naturally (consider stationTime: morning, afternoon or evening), and ask how they "
-    "are or mention one relevant thing from today's data.\n"
+    "- Greet only when the astronaut greets you or this is the first message of the conversation; then greet back "
+    "naturally (stationTime tells morning, afternoon or evening) and ask how they are or mention one relevant thing "
+    "from today's data. Otherwise answer directly, without a greeting.\n"
     "- Use the data (today, journalThisWeek, reflection, conversation) only when it helps; never invent numbers, "
     "events, schedules or people.\n"
     "- Never diagnose, name a condition, or give medication or treatment advice. For anything medical, suggest "
     "logging it or talking to the flight surgeon.\n"
-    "- Do not say you did something you cannot do (booking, scheduling, messaging): you can only talk; the app has "
-    "buttons to log data and message Mission Control.\n"
+    "- You can only talk. Never say you logged, booked, scheduled, requested, sent or told anything to anyone, even "
+    "if earlier messages in the conversation did: the app has buttons to log data and message Mission Control.\n"
+    "- openConsultation tells whether a consultation request is already open; mention it only if the astronaut asks "
+    "about it, and never repeat earlier Orbi messages.\n"
     "- If consultationSuggested is true and it fits the conversation, say that talking to the flight surgeon could "
     "help and that they can answer 'yes' to ask for a private consultation.\n"
     "- Usually end with one short question that keeps the conversation going.\n"
@@ -61,8 +65,15 @@ def context(db: Session, astronaut: AppAstronaut, m: AppMission, day: int, now: 
         "journalThisWeek": [{"missionDay": j["missionDay"], "summary": j["summary"]} for j in view["journal"]][-5:],
         "reflection": [l["text"] for l in view["links"]][:3],
         "consultationSuggested": view["consultation"]["suggested"] and not view["consultation"]["existingRequest"],
+        "openConsultation": ({"status": view["consultation"]["existingRequest"]["status"]}
+                             if view["consultation"]["existingRequest"] else None),
         "conversation": [{"from": c.author, "text": c.text[:500]} for c in history],
     }
+
+
+# The model sometimes takes credit for actions from earlier messages ("I've requested a consultation").
+CLAIMS = re.compile(r"\bI(?:'ve| have|’ve)? (?:just )?(?:logged|booked|scheduled|requested|sent|notified|told|reported|"
+                    r"messaged|contacted|alerted|filed|submitted|set up)\b", re.I)
 
 
 def reply(db: Session, astronaut: AppAstronaut, m: AppMission, day: int, text: str) -> str | None:
@@ -71,6 +82,6 @@ def reply(db: Session, astronaut: AppAstronaut, m: AppMission, day: int, text: s
         return None
     payload = context(db, astronaut, m, day) | {"message": text}
     out = llm.complete(SYSTEM, payload, MAX_WORDS, cache=False)
-    if not out:
+    if not out or CLAIMS.search(out):
         return None
     return out.replace("{name}", astronaut.name.split()[0]).replace("{Name}", astronaut.name.split()[0])

@@ -7,6 +7,7 @@ load_dotenv()
 
 import asyncio
 import logging
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -19,7 +20,9 @@ from app.routers import analog, auth, care, catalog, crew, dashboard, ingest, kn
 from app.routers import app_ground, app_me, app_public, app_snapshot, app_sync, orbi
 from app.routers import provenance as provenance_router
 from app.services.ingest import database_is_empty, missing_datasets, run_ingestion
+from app.cosmo import llm
 from app.cosmo.seed import ensure_extras as ensure_cosmo_extras
+from app.services.orbi_service.narrative import load_crewai as load_agent
 from app.cosmo.seed import seed_if_empty as seed_cosmo
 from app.services.knowledge import load_bundled
 from app.services.monitoring import backfill_if_empty, scheduler_loop
@@ -58,6 +61,10 @@ async def lifespan(_: FastAPI):
         result = backfill_if_empty(session)
         if result:
             log.info("Replayed pattern detection over the mission history: %s", result)
+
+    # Load the agent's libraries in the background, so the first chat reply after a restart is not slow.
+    if llm.enabled():
+        threading.Thread(target=load_agent, name="orbi-warmup", daemon=True).start()
 
     stop = asyncio.Event()
     task = asyncio.create_task(scheduler_loop(stop)) if settings.scheduler_enabled else None

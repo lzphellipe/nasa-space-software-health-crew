@@ -315,3 +315,12 @@ def test_off_limits_model_answers_are_dropped():
     for text in ("You should take 200 mg of ibuprofen.", "This looks like a diagnosis of insomnia.", "You have a sleep disorder."):
         assert llm.OFF_LIMITS.search(text)
     assert not llm.OFF_LIMITS.search("Talking to your flight surgeon could help.")
+
+
+def test_model_reply_that_takes_credit_for_actions_falls_back_to_the_rules(client, h, monkeypatch):
+    from app.cosmo import llm
+
+    monkeypatch.setattr(llm, "enabled", lambda: True)
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: "Good evening, {name}. I've logged the request for a consultation.")
+    body = chat(client, h, "hi").json()
+    assert body["aiGenerated"] is False and "logged the request" not in body["reply"]
