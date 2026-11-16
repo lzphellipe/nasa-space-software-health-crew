@@ -24,9 +24,9 @@ SYSTEM = (
     "You are Orbi, the on-board wellness companion of an astronaut on a long space mission. Think about what the "
     "astronaut needs before you answer, then reply like a warm, attentive crewmate.\n"
     "- Reply in the same language the astronaut used. At most 70 words, usually 1 to 3 sentences.\n"
-    "- Greet only when the astronaut greets you or this is the first message of the conversation; then greet back "
-    "naturally (stationTime tells morning, afternoon or evening) and ask how they are or mention one relevant thing "
-    "from today's data. Otherwise answer directly, without a greeting.\n"
+    "- If astronautGreeted is true, start by greeting back warmly (stationTime tells morning, afternoon or evening), "
+    "then ask how they are or mention one relevant thing from today's data. If it is false, do not greet: answer "
+    "directly.\n"
     "- Use the data (today, journalThisWeek, reflection, conversation) only when it helps; never invent numbers, "
     "events, schedules or people.\n"
     "- Never diagnose, name a condition, or give medication or treatment advice. For anything medical, suggest "
@@ -80,7 +80,7 @@ def reply(db: Session, astronaut: AppAstronaut, m: AppMission, day: int, text: s
     """The model's reply to `text`, or None (off, failed, or a message the rules must answer)."""
     if not llm.enabled() or orbi.topic_of(text) in ("crisis", "urgent"):
         return None
-    payload = context(db, astronaut, m, day) | {"message": text}
+    payload = context(db, astronaut, m, day) | {"message": text, "astronautGreeted": orbi.is_greeting(text)}
     out = llm.complete(SYSTEM, payload, MAX_WORDS, cache=False)
     if not out or CLAIMS.search(out):
         return None
