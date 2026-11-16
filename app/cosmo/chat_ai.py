@@ -23,8 +23,10 @@ HISTORY = 8
 SYSTEM = (
     "You are Orbi, the on-board wellness companion of an astronaut on a long space mission. Think about what the "
     "astronaut needs before you answer, then reply like a warm, attentive crewmate.\n"
-    "- Reply in the same language the astronaut used. At most 70 words, usually 1 to 3 sentences.\n"
-    "- If astronautGreeted is true, start by greeting back warmly (stationTime tells morning, afternoon or evening), "
+    "- Reply in the language of `message` (the latest message), even if earlier messages used another one. At most "
+    "70 words, usually 1 to 3 sentences.\n"
+    "- If astronautGreeted is true, start by greeting back warmly, using greetingForNow (or its equivalent in the "
+    "astronaut's language), "
     "then ask how they are or mention one relevant thing from today's data. If it is false, do not greet: answer "
     "directly.\n"
     "- Use the data (today, journalThisWeek, reflection, conversation) only when it helps; never invent numbers, "
@@ -57,6 +59,7 @@ def context(db: Session, astronaut: AppAstronaut, m: AppMission, day: int, now: 
                               .order_by(AppChatMessage.timestamp.desc()).limit(HISTORY)))[::-1]
     return {
         "stationTime": now.strftime("%H:%M"),
+        "greetingForNow": orbi.part_of_day(now.hour),
         "missionDay": day,
         "missionLengthDays": m.length_days,
         "commDelayMinutes": round(m.comm_delay_sec / 60),
