@@ -223,17 +223,13 @@ The home screen lists modules; logs are saved by type. Each home item carries it
 
 ### Chat with Orbi
 
-```http
-POST /api/v1/app/me/orbi/chat
-{"text": "I slept badly again", "mode": "journal"}        // mode: journal | private
-→ {"reply": "Your last nights averaged 5.4 h (goal 7 h). …", "mode": "journal", "topic": "sleep", "saved": true,
-   "journalEntry": {"id": "jrn-…", "summary": "I slept badly again", "moodLevel": 2, "sourceMessageIds": ["msg-…", "msg-…"]},
-   "messages": [ …the two saved messages… ], "provenance": "RULE_DERIVED"}
-```
+`POST /app/me/orbi/chat {"text": "...", "mode": "journal" | "private"}`
 
-- `journal` saves the message, the reply and a journal entry (also listed in `GET /app/me/journal` and in the mood overview). `private` saves **nothing**: `journalEntry` is `null` and the history does not change.
-- `GET /app/me/orbi/messages` returns the history, oldest first: `{id, astronautId, author: orbi | astronaut, text, timestamp, mode}`.
-- **Replies are rule-based** (keywords plus the day's summary: sleep, exercise, nutrition), labelled `RULE_DERIVED`. There is no language model in this service; one can replace `app/cosmo/orbi.py` behind the same route, and must label its output `AI_GENERATED`. Messages about self-harm or urgent symptoms are answered by pointing to the flight surgeon and Mission Control.
+- **Journal mode:** with `ORBI_AI_ENABLED=true` and `GROQ_API_KEY`, a language model answers (`messageSource: "ai_generated"`). It thinks before answering (reasoning effort "low", a few seconds; up to 30 s on the first call after a restart) and gets the recent conversation, today's evaluation, the week's journal summaries and Orbi's reflection, never the astronaut's name (it writes `{name}`, filled in by the server). It greets back by time of day, replies in the astronaut's language, never diagnoses or advises medication (such answers are dropped) and does not claim to do things it cannot do. Without the model, or if it fails, the rules answer.
+- **Safety first, never the model:** self-harm and urgent symptoms ("I don't want to live anymore", "chest pain", "can't breathe"…) always get the rule answer, which points to the flight surgeon, a crewmate and Mission Control now; Orbi's consultation message follows.
+- **Rules:** greetings ("hi", "good morning Orbi", "oi, tudo bem?") are answered by time of day with one thing from the data; negation is read ("not feeling well" is a low day, not a good one); words match whole ("sweat" is not "eat").
+- **Private mode:** rules only; nothing is stored and nothing goes to a model.
+- Saved exchanges keep a journal entry, as before. `Idempotency-Key` makes a retry safe, and the same id as an offline `chat.save` keeps a single copy.
 
 ### Uploads: voice note and injury photo
 

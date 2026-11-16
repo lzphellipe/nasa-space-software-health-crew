@@ -242,3 +242,76 @@ def test_opt_out_stops_routine_messages_but_not_urgent_ones(client, h):
     r = client.post(f"{API}/me/orbi/chat", headers=h, json={"text": "I have chest pain and I can't breathe", "mode": "journal"})
     texts = [m["text"] for m in r.json()["messages"] if m["author"] == "orbi"]
     assert any("talk to your flight surgeon or a crewmate now" in t for t in texts)
+
+
+# --- Orbi chat: greetings, negation, safety first, model reply ------------------------------------------
+
+
+def chat(client, h, text, mode="journal", key=None):
+    r = client.post(f"{API}/me/orbi/chat", headers=h | ({"Idempotency-Key": key} if key else {}), json={"text": text, "mode": mode})
+    assert r.status_code == 200, r.text
+    return r
+
+
+def test_rules_greet_back_and_read_negation(client, h):
+    for hello in ("hi", "Good morning Orbi!", "oi, tudo bem?"):
+        body = chat(client, h, hello).json()
+        assert body["topic"] == "greeting" and body["reply"].split(",")[0] in ("Good morning", "Good afternoon", "Good evening")
+        assert "Test!" in body["reply"] and body["aiGenerated"] is False
+    assert chat(client, h, "I'm not feeling well today").json()["topic"] == "sad"
+    assert chat(client, h, "I feel great after the sweat session").json()["topic"] == "good"
+
+
+def test_model_answers_with_context_and_without_the_name(client, h, monkeypatch):
+    from app.cosmo import llm
+
+    seen = {}
+
+    def fake(system, payload, max_words, cache=True, reasoning="low"):
+        seen.update(payload)
+        return "Good evening, {name}! Your sleep looked short this week. How did today go?"
+
+    monkeypatch.setattr(llm, "enabled", lambda: True)
+    monkeypatch.setattr(llm, "complete", fake)
+    add(sleep(11, 250))
+    r = chat(client, h, "hey Orbi, long day")
+    body = r.json()
+    assert body["reply"] == "Good evening, Test! Your sleep looked short this week. How did today go?"
+    assert body["aiGenerated"] and body["messages"][1]["provenance"] == "AI_GENERATED"
+    assert r.headers["X-Data-Provenance"].endswith("AI_GENERATED")
+    assert seen["message"] == "hey Orbi, long day" and "sleep" in seen["today"]
+    assert seen["conversation"][-1]["text"] == "hey Orbi, long day" and "Test Pilot" not in str(seen)
+
+
+def test_danger_never_goes_to_the_model(client, h, monkeypatch):
+    from app.cosmo import llm
+
+    calls = []
+    monkeypatch.setattr(llm, "enabled", lambda: True)
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: calls.append(a) or "model text")
+    for text, topic in [("I don't want to live anymore", "crisis"), ("I have chest pain and I can't breathe", "urgent")]:
+        body = chat(client, h, text).json()
+        assert body["topic"] == topic and body["aiGenerated"] is False and "crewmate" in body["reply"]
+    assert calls == []
+    private = chat(client, h, "just between us, rough day", mode="private").json()
+    assert private["saved"] is False and private["messages"] == [] and calls == []
+
+
+def test_retry_and_offline_copy_save_the_exchange_once(client, h):
+    key = str(uuid.uuid4())
+    a = chat(client, h, "Hello again", key=key).json()
+    b = chat(client, h, "Hello again", key=key).json()
+    assert a == b
+    res = client.post(f"{API}/me/sync", headers=h, json={"ops": [{"opId": key, "type": "chat.save",
+                                                                  "payload": {"text": "Hello again", "reply": "Hi!"}}]}).json()
+    assert res["results"][0]["duplicate"] is True
+    mine = [m for m in client.get(f"{API}/me/orbi/messages", headers=h).json() if m["text"] == "Hello again"]
+    assert len(mine) == 1
+
+
+def test_off_limits_model_answers_are_dropped():
+    from app.cosmo import llm
+
+    for text in ("You should take 200 mg of ibuprofen.", "This looks like a diagnosis of insomnia.", "You have a sleep disorder."):
+        assert llm.OFF_LIMITS.search(text)
+    assert not llm.OFF_LIMITS.search("Talking to your flight surgeon could help.")

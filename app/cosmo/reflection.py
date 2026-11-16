@@ -15,18 +15,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import os
 import re
-from collections import OrderedDict
-from datetime import date, datetime, timedelta, timezone
-from threading import Lock
+from datetime import date, datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.cosmo import logic, orbi, telemetry
+from app.cosmo import llm, logic, orbi, telemetry
 from app.cosmo.models import AppAlert, AppAstronaut, AppChatMessage, AppJournalEntry, AppMission
 from app.cosmo.service import astronaut_logs, evaluate
 from app.models import AstronautPreference, SupportRequest, utcnow
@@ -321,8 +317,6 @@ def _ai_payload(entries, links, ev, vitals, consultation) -> dict:
 
 # --- wording by a language model (optional) --------------------------------------------------------
 
-_CACHE: OrderedDict[str, str] = OrderedDict()
-_CACHE_LOCK = Lock()
 MAX_WORDS = 90
 SYSTEM = (
     "You are Orbi, a calm wellness companion for an astronaut on a long mission. You get the astronaut's own "
@@ -336,39 +330,9 @@ SYSTEM = (
 
 
 def ai_enabled() -> bool:
-    return (os.getenv("ORBI_AI_ENABLED", "true").lower() in ("1", "true", "yes")) and bool(os.getenv("GROQ_API_KEY"))
+    return llm.enabled()
 
 
 def narrate(payload: dict) -> str | None:
     """Short text from the model, or None (disabled, failed or off-limits answer)."""
-    if not ai_enabled():
-        return None
-    model = os.getenv("AGENT_MODEL", "groq/llama-3.3-70b-versatile")
-    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
-    key = hashlib.sha256((model + raw).encode()).hexdigest()
-    with _CACHE_LOCK:
-        if key in _CACHE:
-            return _CACHE[key]
-    from app.services.orbi_service import narrative as agent  # loads CrewAI/litellm once, safely
-
-    try:
-        if agent.load_crewai() is None:
-            return None
-        import litellm
-
-        resp = litellm.completion(model=model, temperature=0.2, timeout=agent.LLM_TIMEOUT_SECONDS, max_tokens=1200,
-                                  messages=[{"role": "system", "content": SYSTEM}, {"role": "user", "content": raw}])
-        text = (resp.choices[0].message.content or "").strip()
-    except Exception:
-        logger.exception("Orbi reflection: model call failed; using the rules text")
-        return None
-    finally:
-        agent.detach_litellm_log_filters()
-    text = re.sub(r"\s+", " ", text)
-    if not text or len(text.split()) > MAX_WORDS * 1.5 or re.search(r"\b(diagnos|prescri|dose of|mg\b)", text, re.I):
-        return None
-    with _CACHE_LOCK:
-        _CACHE[key] = text
-        if len(_CACHE) > 256:
-            _CACHE.popitem(last=False)
-    return text
+    return llm.complete(SYSTEM, payload, MAX_WORDS)
