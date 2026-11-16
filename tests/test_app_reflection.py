@@ -281,6 +281,9 @@ def test_model_answers_with_context_and_without_the_name(client, h, monkeypatch)
     assert r.headers["X-Data-Provenance"].endswith("AI_GENERATED")
     assert seen["message"] == "hey Orbi, long day" and "sleep" in seen["today"]
     assert seen["conversation"][-1]["text"] == "hey Orbi, long day" and "Test Pilot" not in str(seen)
+    assert seen["astronautGreeted"] is False
+    chat(client, h, "good evening Orbi")
+    assert seen["astronautGreeted"] is True
 
 
 def test_danger_never_goes_to_the_model(client, h, monkeypatch):
