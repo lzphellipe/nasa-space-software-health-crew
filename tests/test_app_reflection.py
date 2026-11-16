@@ -26,11 +26,11 @@ def h(client):
     from app import db
     from app.cosmo.models import (AppAlert, AppChatMessage, AppConfirmation, AppDeviceReading, AppJournalEntry,
                                   AppLog, AppSyncOp)
-    from app.models import SupportRequest
+    from app.models import AstronautPreference, SupportRequest
 
     with db.SessionLocal() as s:
         for model in (AppJournalEntry, AppChatMessage, AppLog, AppAlert, AppConfirmation, AppDeviceReading, AppSyncOp,
-                      SupportRequest):
+                      SupportRequest, AstronautPreference):
             s.execute(delete(model).where(model.astronaut_id == "ast-test"))
         s.commit()
     return login(client, "TEST", "0000")
@@ -177,3 +177,68 @@ def test_ground_reads_the_reflection_of_a_crew_member(client):
     crew = client.get(f"{API}/ground/crew", headers=ground).json()["crew"]
     assert all("consultation" in row for row in crew)
     assert client.get(f"{API}/ground/astronauts/ast-01/reflection", headers=login(client, "ORB3-ANA", "2026")).status_code == 403
+
+
+# --- Orbi sends the suggestion to the astronaut's chat ------------------------------------------------
+
+
+def orbi_consult_messages(client, h):
+    return [m for m in client.get(f"{API}/me/orbi/messages", headers=h).json() if m["author"] == "orbi"
+            and ("flight surgeon" in m["text"] or "consultation" in m["text"])]
+
+
+def short_night(client, h):
+    r = client.post(f"{API}/me/logs", headers=h, json={"type": "sleep", "environmentId": "sleep", "data": {
+        "bedtime": "2026-11-13T23:40:00Z", "wakeTime": "2026-11-14T04:00:00Z", "quality": 2, "wakeUps": "3+"}})
+    assert r.status_code == 201, r.text
+
+
+def test_orbi_writes_the_suggestion_in_the_chat_once(client, h):
+    add(journal(10, "Could not sleep again."), journal(11, "Slept badly, so tired."), sleep(10, 260), sleep(11, 250))
+    short_night(client, h)
+    [msg] = orbi_consult_messages(client, h)
+    assert msg["text"].startswith("Test, I noticed something: you wrote about sleep on 2 day(s), and the numbers agree")
+    assert 'Reply "yes"' in msg["text"] and msg["mode"] == "journal"
+    snap = client.get(f"{API}/snapshot", headers=h).json()
+    assert any(m["id"] == msg["id"] for m in snap["ai_chat"]["messages"])  # the app shows it in the Orbi tab
+    client.post(f"{API}/me/logs", headers=h, json={"type": "mood", "data": {"level": 2}})
+    assert len(orbi_consult_messages(client, h)) == 1  # same reasons: not sent again
+
+
+def test_yes_in_the_chat_requests_the_consultation(client, h):
+    add(journal(10, "Could not sleep again."), journal(11, "Slept badly, so tired."), sleep(10, 260), sleep(11, 250))
+    short_night(client, h)
+    r = client.post(f"{API}/me/orbi/chat", headers=h, json={"text": "Yes please", "mode": "journal"}).json()
+    done = r["messages"][-1]
+    assert done["author"] == "orbi" and done["text"].startswith("Done, Test. I asked Mission Control")
+    [req] = client.get(f"{API}/me/consultations", headers=h).json()
+    ground = client.get(f"{API}/ground/consultations", headers=login(client, "GROUND", "2026")).json()
+    row = next(x for x in ground if x["requestId"] == req["requestId"])
+    assert "Asked in the Orbi chat: Yes please" in row["message"]
+    client.post(f"{API}/me/orbi/chat", headers=h, json={"text": "yes", "mode": "journal"})
+    assert len(client.get(f"{API}/me/consultations", headers=h).json()) == 1  # nothing new while it is open
+
+
+def test_yes_from_the_offline_queue_requests_the_consultation(client, h):
+    add(journal(10, "Could not sleep again."), journal(11, "Slept badly, so tired."), sleep(10, 260), sleep(11, 250))
+    short_night(client, h)
+    op = {"opId": str(uuid.uuid4()), "type": "chat.save", "payload": {"text": "ok, request a consultation",
+                                                                       "reply": "Sure."}}
+    res = client.post(f"{API}/me/sync", headers=h, json={"ops": [op]}).json()["results"][0]
+    assert res["status"] == "applied" and res["result"]["consultationRequested"] is True
+    assert len(client.get(f"{API}/me/consultations", headers=h).json()) == 1
+
+
+def test_no_suggestion_no_request_from_a_plain_yes(client, h):
+    client.post(f"{API}/me/orbi/chat", headers=h, json={"text": "yes", "mode": "journal"})
+    assert client.get(f"{API}/me/consultations", headers=h).json() == []
+
+
+def test_opt_out_stops_routine_messages_but_not_urgent_ones(client, h):
+    assert client.put(f"{API}/me/preferences", headers=h, json={"proactiveMessages": False}).status_code == 200
+    add(journal(10, "Could not sleep again."), journal(11, "Slept badly, so tired."), sleep(10, 260), sleep(11, 250))
+    short_night(client, h)
+    assert orbi_consult_messages(client, h) == []
+    r = client.post(f"{API}/me/orbi/chat", headers=h, json={"text": "I have chest pain and I can't breathe", "mode": "journal"})
+    texts = [m["text"] for m in r.json()["messages"] if m["author"] == "orbi"]
+    assert any("talk to your flight surgeon or a crewmate now" in t for t in texts)

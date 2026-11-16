@@ -20,16 +20,17 @@ import logging
 import os
 import re
 from collections import OrderedDict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from threading import Lock
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.cosmo import logic, orbi, telemetry
-from app.cosmo.models import AppAlert, AppAstronaut, AppJournalEntry, AppMission
+from app.cosmo.models import AppAlert, AppAstronaut, AppChatMessage, AppJournalEntry, AppMission
 from app.cosmo.service import astronaut_logs, evaluate
-from app.models import SupportRequest
+from app.models import AstronautPreference, SupportRequest, utcnow
+from app.services.support import open_request
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +172,10 @@ def suggest(db: Session, astronaut: AppAstronaut, ev: logic.DayEvaluation, entri
     if checks:
         urgent = urgent or any(a.level == "high" for a in checks)
         reasons.append({"code": "device_check", "text": checks[0].text, "evidence": [a.id for a in checks]})
+    # What the astronaut wrote and the numbers agree: the reason Orbi leads with.
+    lasting = [l for l in links if l["agreement"] == "consistent" and len(l["journalDays"]) >= 2]
+    for l in lasting:
+        reasons.append({"code": "journal_and_numbers", "text": l["text"], "evidence": l["journalEntryIds"] + l["evidence"]})
     high = [a for a in alerts if a.level == "high" and a.type != "device_check"]
     if high:
         reasons.append({"code": "high_alert", "text": high[0].text, "evidence": [a.id for a in high]})
@@ -178,9 +183,6 @@ def suggest(db: Session, astronaut: AppAstronaut, ev: logic.DayEvaluation, entri
     if len(in_alert) >= 2:
         reasons.append({"code": "several_areas", "text": f"Several areas are in alert: {', '.join(sorted(in_alert))}.",
                         "evidence": sorted(in_alert)})
-    lasting = [l for l in links if l["agreement"] == "consistent" and len(l["journalDays"]) >= 2]
-    for l in lasting:
-        reasons.append({"code": "journal_and_numbers", "text": l["text"], "evidence": l["journalEntryIds"] + l["evidence"]})
     existing = _open_request(db, astronaut.id)
     suggested = bool(reasons)
     first = astronaut.name.split()[0]
@@ -197,6 +199,99 @@ def suggest(db: Session, astronaut: AppAstronaut, ev: logic.DayEvaluation, entri
             "existingRequest": {"id": existing.id, "status": existing.status, "priority": existing.priority,
                                 "createdAt": telemetry._iso(telemetry._as_utc(existing.created_at))} if existing else None,
             "basis": "illustrative_rules_not_clinical_criteria"}
+
+
+# --- Orbi tells the astronaut (a message in the Orbi chat) -----------------------------------------
+
+MESSAGE_SOURCE = "consult"  # AppChatMessage.source of these messages
+RESEND_AFTER_DAYS = 3
+YES = re.compile(r"^\s*(yes|yeah|yep|sure|ok|okay|please|go ahead|do it|sim|pode|quero)\b|"
+                 r"(request|book|ask for|schedule) (a |the )?(private )?(medical )?consultation|talk to (the|my) (flight )?(surgeon|doctor)",
+                 re.I)
+
+
+def open_consultation(db: Session, astronaut: AppAstronaut, m: AppMission, day: int, note: str | None = None,
+                      via: str = "the CosmoMedic app") -> tuple[SupportRequest, dict]:
+    """Opens (or returns the open) consultation request with Orbi's reasons. The caller commits."""
+    c = build(db, astronaut, m, day, ai=False)["consultation"]
+    reasons = "; ".join(r["text"] for r in c["reasons"]) or "astronaut request"
+    message = (f"Consultation requested from {via}."
+               + (f" Astronaut's note: {note.strip()}" if note and note.strip() else "")
+               + f" Orbi's reasons: {reasons}")
+    req = open_request(db, astronaut_id=astronaut.id, mission_id=astronaut.mission_id, mission_day=day,
+                       reason=CONSULTATION_REASON, detail=CONSULTATION_DETAIL, topic="medical",
+                       priority=c["priority"], message=message[:4000])
+    return req, c
+
+
+def _message_id(astronaut_id: str, codes: list[str], day: int) -> str:
+    return f"oc-{astronaut_id}-{hashlib.sha256('|'.join(codes).encode()).hexdigest()[:8]}-d{day}"
+
+
+def _last_suggestion(db: Session, astronaut_id: str) -> AppChatMessage | None:
+    return db.scalar(select(AppChatMessage).where(AppChatMessage.astronaut_id == astronaut_id,
+                                                  AppChatMessage.source == MESSAGE_SOURCE,
+                                                  AppChatMessage.id.like("oc-%"))
+                     .order_by(AppChatMessage.timestamp.desc()).limit(1))
+
+
+def send_suggestion(db: Session, astronaut: AppAstronaut, m: AppMission, day: int,
+                    at: datetime | None = None) -> AppChatMessage | None:
+    """Orbi writes the consultation suggestion in the astronaut's chat, once per set of reasons.
+
+    Not sent while a consultation is open, again within 3 mission days for the same reasons, or when
+    the astronaut turned Orbi's proactive messages off (urgent ones are always sent). The caller commits.
+    """
+    c = build(db, astronaut, m, day, ai=False)["consultation"]
+    if not c["suggested"] or c["existingRequest"]:
+        return None
+    urgent = c["priority"] == "urgent"
+    pref = db.get(AstronautPreference, astronaut.id)
+    if pref is not None and not pref.proactive_messages and not urgent:
+        return None
+    codes = sorted({r["code"] for r in c["reasons"]})
+    prefix = _message_id(astronaut.id, codes, 0).rsplit("-d", 1)[0]
+    for d in range(max(1, day - RESEND_AFTER_DAYS + 1), day + 1):
+        if db.get(AppChatMessage, f"{prefix}-d{d}") is not None:
+            return None
+    first = astronaut.name.split()[0]
+    if urgent:
+        text = c["message"]
+    else:
+        why = c["reasons"][0]["text"].rstrip(".")
+        why = why[0].lower() + why[1:] if why[1:2].islower() else why
+        n_more = len(c["reasons"]) - 1
+        more = f" There {'is' if n_more == 1 else 'are'} also {n_more} more sign{'' if n_more == 1 else 's'} worth a look." if n_more else ""
+        text = (f"{first}, I noticed something: {why}.{more} Talking to your flight surgeon could help. "
+                "Reply \"yes\" and I'll request a private consultation for you.")
+    msg = AppChatMessage(id=_message_id(astronaut.id, codes, day), astronaut_id=astronaut.id, author="orbi",
+                         text=text, timestamp=at or utcnow(), mode="journal", source=MESSAGE_SOURCE)
+    db.add(msg)
+    db.flush()
+    return msg
+
+
+def accept_from_chat(db: Session, astronaut: AppAstronaut, m: AppMission, day: int, text: str,
+                     at: datetime | None = None) -> AppChatMessage | None:
+    """A "yes" in the chat after Orbi's suggestion (last 3 days) opens the consultation. The caller commits."""
+    last = _last_suggestion(db, astronaut.id)
+    if last is None or not YES.search(text or ""):
+        return None
+    sent_day = int(last.id.rsplit("-d", 1)[1])
+    if sent_day < day - RESEND_AFTER_DAYS + 1 or _open_request(db, astronaut.id) is not None:
+        return None
+    req, _ = open_consultation(db, astronaut, m, day, note=f"Asked in the Orbi chat: {text.strip()[:300]}",
+                               via="the Orbi chat")
+    reply = AppChatMessage(id=f"ocd-{req.id}", astronaut_id=astronaut.id, author="orbi",
+                           text=(f"Done, {astronaut.name.split()[0]}. I asked Mission Control for a private consultation "
+                                 f"with your flight surgeon (request #{req.id}). Earth is about "
+                                 f"{round(m.comm_delay_sec / 60)} minutes away, so the reply will take a while."),
+                           timestamp=at or utcnow(), mode="journal", source=MESSAGE_SOURCE)
+    if db.get(AppChatMessage, reply.id) is None:
+        db.add(reply)
+        db.flush()
+        return reply
+    return None
 
 
 def _rules_text(astronaut: AppAstronaut, entries: list[dict], links: list[dict], consultation: dict) -> str:

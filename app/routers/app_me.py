@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -50,6 +51,8 @@ from app.models import AstronautPreference, ProactiveMessage, SupportRequest, Us
 from app.provenance import DEVICE, SIMULATED
 from app.schemas import APIModel
 from app.services.support import open_request
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/app/me", tags=["app: astronaut"])
 
@@ -221,6 +224,19 @@ def _after_save(db: Session, astronaut: AppAstronaut, day: int, log: AppLog) -> 
     return changed, request_id
 
 
+def nudge(db: Session, astronaut: AppAstronaut, m, day: int, at: datetime | None = None):
+    """After something that can change Orbi's view: send the consultation suggestion to the chat if it is due.
+    Never fails the request that triggered it."""
+    try:
+        msg = reflection.send_suggestion(db, astronaut, m, day, at)
+        db.commit()
+        return msg
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("Orbi consultation message failed")
+        return None
+
+
 IDEMPOTENCY_KEY = Header(None, alias="Idempotency-Key", min_length=8, max_length=64,
                          description="Id made by the app for this request. Sending it again returns the first "
                                      "answer instead of saving twice (safe retry after a dropped connection).")
@@ -271,6 +287,7 @@ def save_new_log(db: Session, astronaut: AppAstronaut, body, source: str = "app"
     db.flush()
     changed, request_id = _after_save(db, astronaut, today, log)
     db.commit()
+    nudge(db, astronaut, m, today)
     message = f"Log saved to your mission record · +{coins} mission coins"
     if bonus:
         message += f" ({bonus['streak']}-day check-in streak: +{logic.STREAK_BONUS})"
@@ -296,6 +313,7 @@ def update_log(log_id: str, body: LogIn, astronaut: AppAstronaut = Depends(curre
     db.flush()
     changed, request_id = _after_save(db, astronaut, day, log)
     db.commit()
+    nudge(db, astronaut, m, day)
     return LogSaved(log=views.log_out(log), coins=astronaut.avatar.get("coins", 0), coins_earned=0,
                     logged_today=log.mission_day == day, alerts=[views.alert_out(a) for a in changed],
                     support_request_id=request_id, message="Log updated")
@@ -430,6 +448,11 @@ def orbi_chat(body: OrbiChatIn, astronaut: AppAstronaut = Depends(current_astron
     db.add_all([mine, answer, entry])
     db.commit()
     out["messages"] = [_chat_out(mine), _chat_out(answer)]
+    extra = reflection.accept_from_chat(db, astronaut, m, day, text, now + timedelta(milliseconds=2))
+    db.commit()
+    extra = extra or nudge(db, astronaut, m, day, now + timedelta(milliseconds=2))
+    if extra is not None:
+        out["messages"].append(_chat_out(extra))
     out["journalEntry"] = {"id": entry.id, "astronautId": entry.astronaut_id, "timestamp": views.iso(entry.timestamp),
                            "summary": entry.summary, "moodLevel": entry.mood_level,
                            "sourceMessageIds": entry.source_message_ids}
@@ -461,15 +484,7 @@ def request_consultation(db: Session, astronaut: AppAstronaut, body: Consultatio
     if not body.confirmed:
         raise HTTPException(422, "Confirm to request the consultation")
     m, day = mission_day(db)
-    view = reflection.build(db, astronaut, m, day, ai=False)
-    c = view["consultation"]
-    reasons = "; ".join(r["text"] for r in c["reasons"]) or "astronaut request"
-    message = ("Consultation requested from the CosmoMedic app."
-               + (f" Astronaut's note: {body.note.strip()}" if body.note and body.note.strip() else "")
-               + f" Orbi's reasons: {reasons}")
-    req = open_request(db, astronaut_id=astronaut.id, mission_id=astronaut.mission_id, mission_day=day,
-                       reason=reflection.CONSULTATION_REASON, detail=reflection.CONSULTATION_DETAIL,
-                       topic="medical", priority=c["priority"], message=message[:4000])
+    req, c = reflection.open_consultation(db, astronaut, m, day, note=body.note)
     db.commit()
     return {"requestId": req.id, "status": req.status, "priority": req.priority, "missionDay": req.mission_day,
             "suggestedByOrbi": c["suggested"], "reasons": c["reasons"],
@@ -654,7 +669,7 @@ def answer(conf_id: str, body: AnswerIn, astronaut: AppAstronaut = Depends(curre
     conf = _confirmation(db, astronaut, conf_id)
     if conf.kind != "check":
         raise HTTPException(422, "This is a reading to save: use /confirm or /dismiss")
-    _, day = mission_day(db)
+    m, day = mission_day(db)
     conf.status, conf.resolved_at = "answered", utcnow()
     conf.answer = {"answer": body.answer, "symptoms": body.symptoms, "note": body.note}
     alert = None
@@ -680,6 +695,8 @@ def answer(conf_id: str, body: AnswerIn, astronaut: AppAstronaut = Depends(curre
                  "message to Mission Control if it gets worse." if urgent else
                  "I've let the ground medical team know. Rest, drink water, and log how you feel later.")
     db.commit()
+    if body.answer == "not_ok":
+        nudge(db, astronaut, m, day)
     return {"confirmation": telemetry.confirmation_out(conf), "reply": reply,
             "alert": views.alert_out(alert).model_dump(mode="json", by_alias=True) if alert else None}
 
