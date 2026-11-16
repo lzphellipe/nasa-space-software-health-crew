@@ -1,37 +1,81 @@
 # Crew Health API
 
-FastAPI service that serves astronaut health data to the React Native crew app, the crew-wide monitoring dashboard and the AI agent. It has three data sets, kept apart because they describe different people:
+Backend of **CosmoMedic**, a health monitoring system for astronauts on long-duration missions, built for the **NASA Space Apps Challenge 2026**. One FastAPI service serves the astronaut app, the ground team's dashboard and **Orbi**, the health assistant.
+
+| | |
+|---|---|
+| API (production) | https://crew-health-api-univesp.azurewebsites.net |
+| Interactive docs (OpenAPI) | https://crew-health-api-univesp.azurewebsites.net/docs |
+| Health check | https://crew-health-api-univesp.azurewebsites.net/health |
+| CosmoMedic app | https://nasa-space-apps-2026-front-end.vercel.app ([frontend repository](https://github.com/moniquecardoso25/nasa-space-apps-2026-front-end)) |
+
+> **Not a medical device.** Hackathon prototype. Reference ranges come from the labs that ran the tests; alert thresholds, device checks and consultation rules are illustrative; device telemetry is simulated; Orbi's texts were not reviewed by a clinician. Do not use it with real health data before the items in [Security](#security) are done.
+
+## Contents
+
+- [What it does](#what-it-does) · [Architecture](#architecture) · [Demo accounts](#demo-accounts) · [Quick start](#quick-start)
+- [CosmoMedic app (`/api/v1/app`)](#cosmomedic-app-apiv1app): login, endpoints, logs, telemetry, Orbi chat, reflection and consultation, offline sync, meal plan, rules, provenance, frontend integration
+- [Orbi insights agent (`/api/v1/orbi`)](#orbi-insights-agent-apiv1orbi)
+- [Crew monitoring](#crew-monitoring) · [AGBRESA bed rest study](#agbresa-bed-rest-study-real-data-earth-analog) · [Synthetic mission](#synthetic-mission-daily-vitals-for-the-ai-agent) · [OSDR blood panels](#osdr-blood-panels) · [Data sources](#data-sources-osdr)
+- [Resilience and failure handling](#resilience-and-failure-handling) · [Security](#security) · [Tests](#tests)
+- [Deploy](#deploy-azure-app-service) · [Configuration](#configuration) · [Limitations](#limitations) · [Project layout](#project-layout) · [Changelog](#changelog)
+
+## What it does
+
+- **Daily logging with immediate feedback.** Mood, sleep, radiation, body measurements, meals, exercise and injuries update a daily health score, body areas, alerts and mission coins.
+- **Works with no link to Earth.** The app works on a local copy and sends a queue in which each operation is applied once, even if it is sent again. The ground team sees how old each astronaut's data is.
+- **Orbi, the assistant.** Chats with the day's context (a language model writes the text; rules handle safety), reads the journal together with the numbers, and suggests a medical consultation when signs add up, writing it in the astronaut's chat.
+- **Device telemetry.** Wearable, blood pressure cuff, dosimeter and EVA suit; readings become logs only after the astronaut confirms, and out-of-range values trigger a quick check.
+- **Ground dashboard.** Crew status, alerts, link status, messages with communication delay, consultation requests with Orbi's reasons, meal plans.
+- **Traceable data.** Every response says where its data came from (real research, simulated, measured, typed, computed or AI-written).
+
+It holds three research data sets, kept apart because they describe different people:
 
 1. **Real data from NASA OSDR**: blood panels of the four Inspiration4 crew members, before and after flight (`/api/v1/crew`, `/api/v1/dashboard`).
 2. **Real data from the AGBRESA bed rest study** (DLR/ESA/NASA): heart rate, blood pressure, sleepiness, motion sickness and mood of 24 volunteers over 60 days of head-down bed rest, an Earth analog of microgravity (`/api/v1/analog/agbresa`).
-3. **Synthetic daily vitals** for a 6-month mission with four astronauts, generated because no open source has daily vital signs for any crew (`/api/v1/missions`).
+3. **Synthetic daily vitals** for a 6-month mission with four astronauts, generated because no open source has daily vital signs for any crew (`/api/v1/missions`, and the Orbi insights agent in `/api/v1/orbi`).
 
-On top of the synthetic mission, the API runs the crew monitoring itself: login per astronaut, daily check-ins (stress, fatigue, symptoms), pattern detection over a rolling 7-day window, proactive messages (at most one every 7 days, can be turned off), routing to human support, and keyword search in PDF documents. There is no AI agent in this service.
+On top of the synthetic mission, the API also runs crew monitoring: login per astronaut, daily check-ins (stress, fatigue, symptoms), pattern detection over a rolling 7-day window, proactive messages (at most one every 7 days, can be turned off), routing to human support, and keyword search in PDF documents.
 
-> **Not a medical device.** Reference ranges come from the labs that ran the tests; the deviation rules are illustrative.
+In numbers: 142 HTTP operations, 181 automated tests, deployed on every merge to `main`.
 
-## Data sources (OSDR)
+## Architecture
 
-The real data comes from the SpaceX **Inspiration4** mission (3 days in low Earth orbit, September 2021, 4 crew members, de-identified as `C001`–`C004` in OSDR). Samples were collected at **L-92, L-44, L-3** (days before launch) and **R+1, R+45, R+82, R+194** (days after return).
+```
+ CosmoMedic app (React Native / Expo)     Ground dashboard (web)        GitHub Actions
+            │ HTTPS + JWT                        │ HTTPS + JWT              │ tests + deploy
+            ▼                                    ▼                          ▼
+ ┌──────────────────────── Azure App Service · FastAPI · Python 3.12 ────────────────────────┐
+ │  routers (/api/v1/…)  →  rules and services (score, alerts, patterns, offline queue,       │
+ │                          telemetry, Orbi rules, consultation)                              │
+ │  SQLite in /home/data (PostgreSQL supported)        Orbi AI layer (optional, writes text) ─┼──→ Groq (LLM)
+ │  scheduler (pattern detection, proactive messages)                                         │
+ └────────────────────────────────────────────────────────────────────────────────────────────┘
+            ▲ loaded on first start (bundled copies when the sites are unreachable)
+ NASA OSDR (Inspiration4) · AGBRESA (PLOS) · NASA-STD-3001 PDF
+```
 
-| Dataset key | Study | File | Content |
-|---|---|---|---|
-| `cbc` | [OSD-569](https://osdr.nasa.gov/bio/repo/data/studies/OSD-569) | `LSDS-7_Complete_Blood_Count_CBC_TRANSFORMED.csv` | Complete blood count, 20 analytes, whole blood |
-| `cmp` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Comprehensive_Metabolic_Panel_CMP_TRANSFORMED.csv` | Metabolic panel, 19 analytes, serum |
-| `cardio` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Multiplex_serum_cardiovascular_EvePanel_TRANSFORMED.csv` | Multiplex cardiovascular panel, 9 analytes, serum |
-| `immune` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Multiplex_serum_immune_EvePanel_TRANSFORMED.csv` | **Research:** immune cytokine array (Eve HD71), 71 analytes, pg/mL, serum |
-| `alamar` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Multiplex_serum.immune.AlamarPanel_TRANSFORMED.csv` | **Research:** inflammation panel (Alamar NULISAseq), 203 proteins, NPQ (log2), serum |
+| Decision | Why | Consequence |
+|---|---|---|
+| One service | Small team, 48-hour deadline | Simple deploy; scaling out needs the scheduler moved out |
+| SQLite on the App Service disk | No extra cost, no network hop | One instance only; PostgreSQL is already supported |
+| NASA data bundled in the code | The API starts without NASA's sites | New data needs a release or a manual ingest |
+| **Rules decide, AI only writes** | Predictable and safe on health topics | The model can fail without touching alerts, consultations or risk cases |
+| Local-first app | Delay and drops in the link with Earth | Idempotent sync queue on the server |
+| Provenance on every response | Tell real, simulated and AI data apart | `X-Data-Provenance` header and `provenance` field |
 
-Clinical panels: 84 samples, 48 analytes, 1,344 measurements. Research panels: 55 samples (28 Eve, 27 Alamar: C003 has no L-44), 274 analytes, 7,469 measurements.
+## Demo accounts
 
-**Research panels** (`immune`, `alamar`) are hundreds of proteins without clinical reference ranges. They are stored and fully queryable (`/analytes?panel=`, `/measurements?panel=`, `/crew/{id}/measurements?panel=`, `/crew/{id}/analytes/{code}/series`, `/dashboard/heatmap?panel=`, the CSV export), but **left out of the crew status, summaries, alerts and the overview counts**, so they do not drown the 48 clinical analytes. The overview lists them in `researchPanels`.
+Demo credentials only; turn them off outside the event (`SEED_DEMO_USERS=false`, new `DEMO_PASSWORD` and PINs).
 
-- Alamar codes are prefixed `alamar_` (e.g. `alamar_il6`): EGF, LIF and TSLP are measured by both arrays.
-- Alamar values are NPQ, a log2 scale (+1 NPQ is about twice as much). `deltaAbs` is in NPQ, `deltaPct` is the fold change, `(2^deltaAbs − 1) × 100`, and `watch` needs |deltaAbs| ≥ 1 (2-fold) and |z| ≥ 2.
-- None of the OSD-575 serum panels has in-flight samples: only L-92, L-44, L-3 and R+1…R+194.
-- A database created by an older version gets new datasets on the next start; unchanged files are skipped by their SHA-256.
-
-The download URL is resolved through the study file listing (`/osdr/data/osd/files/<n>`), with the documented `geode-py` URL as fallback; the download redirects to a signed S3 URL. A copy of each file ships in `app/seed/`, so the API also starts offline (`INGEST_SOURCE=auto` falls back to it automatically).
+| Username (`/api/v1/auth/login`) | Crew ID (`/api/v1/app/auth/login`) | Password / PIN | Role | Use |
+|---|---|---|---|---|
+| `orb3-ana`, `orb3-raj`, `orb3-mika`, `orb3-leo` | `ORB3-ANA`, `ORB3-RAJ`, `ORB3-MIKA`, `ORB3-LEO` | `2026` | astronaut | CosmoMedic crew (mission Orbit-3) |
+| `test` | `TEST` | `0000` | astronaut | Testing: 999,999 coins, out of the ranking and the ground table |
+| `ground` | `GROUND` | `2026` | medical | Ground dashboard |
+| `surgeon` | — | `spaceapps2026` | medical | Care team |
+| `admin` | — | `spaceapps2026` | admin | Care team and administration |
+| `astronaut1` … `astronaut4` | — | `spaceapps2026` | astronaut | Synthetic mission (A001–A004); no CosmoMedic profile |
 
 ## Quick start
 
@@ -75,6 +119,7 @@ POST /api/v1/app/auth/login
 
 - The access token lasts 30 minutes. Renew it with `POST /api/v1/auth/refresh {"refreshToken": "…"}`: it returns a new pair, and the refresh token used is no longer valid (keep the newest one). The refresh token lasts 30 days.
 - `role` is `astronaut` or `ground`. For `GROUND`, `astronaut` is `null` and `next` is `/ground`.
+- The same accounts also sign in through `POST /api/v1/auth/login {"username": "orb3-ana", "password": "2026"}` (username = Crew ID in lower case, password = PIN), which is what the CosmoMedic app uses. That answer has `user` (`username`, `displayName`, `role`, `astronautId`) instead of `astronaut`.
 
 ### Endpoints
 
@@ -201,7 +246,7 @@ Far from Earth the link has a delay (`commDelaySec` of the mission) and drops. T
 
 **3. Ground view.** Logs carry `timestamp` (when it happened) and `receivedAt` (when the server got it). `GET /app/ground/crew` adds `link` to each row: `status` (`online`: contact in the last 15 minutes; `delayed`: up to 12 hours; `offline`: longer; `unknown`: never), `lastContactAt`, `lastDeviceSyncAt`, `minutesSinceContact`, `queuedOnDevice` and `lastBatch` (how many operations and the largest delay). `GET /app/ground/astronauts/{id}/sync` lists the operations received, each with `lagSec`, the time between the astronaut doing it and the server receiving it.
 
-What is not in the backend: the queue and the local storage themselves live in the app (for example SQLite or AsyncStorage in React Native). The current frontend calls the API directly and does not use these routes yet.
+What is not in the backend: the queue and the local storage themselves live in the app. The CosmoMedic frontend loads `/app/snapshot` at sign-in, writes each change locally first, sends it (online right away, otherwise through the queue to `/app/me/sync`) and refreshes the snapshot after each upload and every minute.
 
 ### Module names and log types
 
@@ -303,31 +348,28 @@ Every item has a `provenance` and every response an `X-Data-Provenance` header; 
 | `USER_REPORTED` | typed in by the astronaut |
 | `RULE_DERIVED` | computed by documented rules, no AI |
 | `REFERENCE_DOCUMENT` | text from the PDF knowledge base |
-| `AI_GENERATED` | text written by a language model: only `/api/v1/orbi` (insights and consultation briefings), when `ORBI_AI_ENABLED=true` and `GROQ_API_KEY` is set; each answer says so in `aiGenerated` and `messageSource` |
+| `AI_GENERATED` | text written by a language model, when `ORBI_AI_ENABLED=true` and `GROQ_API_KEY` is set: the Orbi chat in journal mode (`/app/me/orbi/chat`), the reflection narrative (`/app/me/orbi/reflection`) and the insights agent (`/api/v1/orbi`); each answer says so in `aiGenerated` and `messageSource`, and the header ends with `AI_GENERATED` |
 | `DEVICE_MEASURED` | sent by a paired wearable, cuff, dosimeter or EVA suit |
 
-### Replacing the mock in the frontend
+### Frontend integration
 
-```ts
-const API = "http://192.168.0.10:8000/api/v1/app";
+The CosmoMedic app ([repository](https://github.com/moniquecardoso25/nasa-space-apps-2026-front-end)) reads the API address from `EXPO_PUBLIC_API_URL`, including `/api/v1`:
 
-export async function crewLogin(crewId: string, pin: string) {
-  const res = await fetch(`${API}/auth/login`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ crewId, pin }),
-  });
-  if (!res.ok) throw new Error("Invalid Crew ID or PIN");
-  return res.json(); // { accessToken, astronaut, next }
-}
-
-const get = (path: string, token: string) =>
-  fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json());
-
-// const { accessToken, refreshToken } = await crewLogin("ORB3-ANA", "2026");
-// const home = await get("/me/home", accessToken);
-// const sleep = await get("/me/logs/sleep/overview", accessToken);
-// await fetch(`${API}/me/logs`, { method: "POST", headers: {...}, body: JSON.stringify({ type: "mood", data: { level: 4, tags: [] } }) });
+```bash
+EXPO_PUBLIC_API_URL=https://crew-health-api-univesp.azurewebsites.net/api/v1
+# EXPO_PUBLIC_USE_MOCK_DATA=true   # demo data only, no server
 ```
+
+It is a build variable of the app (set it in Vercel or in the app's `.env`), not an App Service setting. The flow the app follows:
+
+1. `POST /auth/login` with username and password (or `/app/auth/login` with Crew ID and PIN); keep `accessToken` and `refreshToken`, and renew with `/auth/refresh` on a 401.
+2. `GET /app/snapshot`: replaces the app's in-memory database (`mock-db.json` shape).
+3. Writes go to the matching route (`/app/me/logs`, `/app/me/ground-messages`, `/app/me/orbi/chat`…) with an `Idempotency-Key`; if the server cannot be reached they wait in the local queue and go to `/app/me/sync` later with the same id as `opId`.
+4. After each upload, and every minute, `GET /app/snapshot` again.
+
+The app shows "Unable to reach Mission Control" when the server is down at sign-in, "Offline. Changes are saved on this device." when it drops later, and a red notice for any change the server rejects. There is no silent fallback to demo data. CORS allows any origin by default (`CORS_ORIGINS`), and `X-Data-Provenance` is exposed to browsers.
+
+Generate TypeScript types from the schema with `npx openapi-typescript https://crew-health-api-univesp.azurewebsites.net/openapi.json -o src/api/schema.ts`.
 
 ## Crew monitoring
 
@@ -625,6 +667,45 @@ Daily records come as `values` and `metricStatus` objects keyed by metric code, 
 }
 ```
 
+## Orbi insights agent (`/api/v1/orbi`)
+
+AI insights over the **synthetic mission** (astronauts `A001`–`A004`, accounts `astronaut1`–`astronaut4`), built with CrewAI and the same model as the chat. Every text has a statistical fallback.
+
+| Method and route | Access | What it does |
+|---|---|---|
+| `GET /api/v1/orbi/insights?page=&missionDay=&astronautId=` | logged in (own data; care team any) | One insight for a page: `home`, `sleep`, `mood`, `body`, `meals`… with the metrics behind it and grounded guidance |
+| `POST /api/v1/orbi/consultations` | astronaut | `{"confirmed": true, "missionDay": 120, "message": "…"}`: opens a support request and freezes a medical briefing (gzip JSON with SHA-256) |
+| `GET /api/v1/orbi/consultations/{id}/packet` | owner or care team | The exact frozen bytes (`X-Report-SHA256`) |
+| `GET /api/v1/orbi/ground/consultations/{id}/fhir` | care team | The briefing as a FHIR R4 bundle, after an integrity check |
+| `POST /api/v1/orbi/ground/consultations/{id}/receive` | care team | Checks that a received packet matches the stored one, then converts it to FHIR |
+
+- `messageSource` is `ai_generated`, `ai_cached` (same astronaut, day, page and evidence while the process runs) or `statistical_fallback`; `aiGenerated` says the same.
+- The model gets selected (simulated) measurements, never raw chats or symptom notes. Calls that hit Groq's rate limit are retried up to 3 times, so an answer can take 10–25 s.
+- More detail in [`app/ORBI_STEP2_README.md`](app/ORBI_STEP2_README.md).
+
+## Data sources (OSDR)
+
+The real data comes from the SpaceX **Inspiration4** mission (3 days in low Earth orbit, September 2021, 4 crew members, de-identified as `C001`–`C004` in OSDR). Samples were collected at **L-92, L-44, L-3** (days before launch) and **R+1, R+45, R+82, R+194** (days after return).
+
+| Dataset key | Study | File | Content |
+|---|---|---|---|
+| `cbc` | [OSD-569](https://osdr.nasa.gov/bio/repo/data/studies/OSD-569) | `LSDS-7_Complete_Blood_Count_CBC_TRANSFORMED.csv` | Complete blood count, 20 analytes, whole blood |
+| `cmp` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Comprehensive_Metabolic_Panel_CMP_TRANSFORMED.csv` | Metabolic panel, 19 analytes, serum |
+| `cardio` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Multiplex_serum_cardiovascular_EvePanel_TRANSFORMED.csv` | Multiplex cardiovascular panel, 9 analytes, serum |
+| `immune` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Multiplex_serum_immune_EvePanel_TRANSFORMED.csv` | **Research:** immune cytokine array (Eve HD71), 71 analytes, pg/mL, serum |
+| `alamar` | [OSD-575](https://osdr.nasa.gov/bio/repo/data/studies/OSD-575) | `LSDS-8_Multiplex_serum.immune.AlamarPanel_TRANSFORMED.csv` | **Research:** inflammation panel (Alamar NULISAseq), 203 proteins, NPQ (log2), serum |
+
+Clinical panels: 84 samples, 48 analytes, 1,344 measurements. Research panels: 55 samples (28 Eve, 27 Alamar: C003 has no L-44), 274 analytes, 7,469 measurements.
+
+**Research panels** (`immune`, `alamar`) are hundreds of proteins without clinical reference ranges. They are stored and fully queryable (`/analytes?panel=`, `/measurements?panel=`, `/crew/{id}/measurements?panel=`, `/crew/{id}/analytes/{code}/series`, `/dashboard/heatmap?panel=`, the CSV export), but **left out of the crew status, summaries, alerts and the overview counts**, so they do not drown the 48 clinical analytes. The overview lists them in `researchPanels`.
+
+- Alamar codes are prefixed `alamar_` (e.g. `alamar_il6`): EGF, LIF and TSLP are measured by both arrays.
+- Alamar values are NPQ, a log2 scale (+1 NPQ is about twice as much). `deltaAbs` is in NPQ, `deltaPct` is the fold change, `(2^deltaAbs − 1) × 100`, and `watch` needs |deltaAbs| ≥ 1 (2-fold) and |z| ≥ 2.
+- None of the OSD-575 serum panels has in-flight samples: only L-92, L-44, L-3 and R+1…R+194.
+- A database created by an older version gets new datasets on the next start; unchanged files are skipped by their SHA-256.
+
+The download URL is resolved through the study file listing (`/osdr/data/osd/files/<n>`), with the documented `geode-py` URL as fallback; the download redirects to a signed S3 URL. A copy of each file ships in `app/seed/`, so the API also starts offline (`INGEST_SOURCE=auto` falls back to it automatically).
+
 ## OSDR blood panels
 
 ### How the data is processed
@@ -740,7 +821,7 @@ JSON keys are **camelCase**. Interactive docs at `/docs`, OpenAPI schema at `/op
 }
 ```
 
-## Consuming from React Native
+## Consuming the monitoring routes from React Native
 
 ```ts
 const API_URL = "http://192.168.0.10:8000"; // the machine running the API, reachable from the phone
@@ -773,6 +854,62 @@ export async function api(path: string, token?: string, init: RequestInit = {}) 
 TypeScript types can be generated from the schema: `npx openapi-typescript http://localhost:8000/openapi.json -o src/api/schema.ts`.
 
 On a physical device `localhost` is the phone itself; use the computer's LAN IP (or `10.0.2.2` on the Android emulator).
+
+## Resilience and failure handling
+
+Every part that depends on something outside has a fallback. There is no circuit breaker yet: if Groq is down, each journal message waits up to `ORBI_AI_TIMEOUT_SEC` (30 s) before the rules answer.
+
+| Failure | What the backend does | What the app shows |
+|---|---|---|
+| Groq down, slow or a forbidden answer (diagnosis, dose, claimed action) | Answers with the rules | Nothing; Orbi answers normally |
+| Agent libraries fail to load | Marks it and uses only rules until restart | Nothing |
+| NASA or PLOS sites down | Uses the bundled copies (`INGEST_SOURCE=auto`) | Nothing |
+| Batch sent again after a drop | Applies each `opId` once | Nothing; no duplicates |
+| Server down at sign-in | — | "Unable to reach Mission Control" |
+| Server drops with the app open | — | "Offline. Changes are saved on this device."; the queue goes up when it is back |
+| Change refused | `rejected` or `conflict` in `/sync` | Red notice |
+| Session expired | 401; the app tries one refresh | "Your session ended. Sign in again…" |
+
+- AI failures are silent on purpose: the astronaut always gets an answer and risk messages never depend on the model. The source is always recorded (`messageSource`, `provenance`).
+- The language model libraries are loaded once, under a lock, in a background thread at startup when AI is on. **Incident of 15/11/2026:** LiteLLM installs log filters on the server's loggers (uvicorn, asyncio, httpx); they failed in production and every log line, and so every request, failed for about 15 minutes. Since #10 those filters are removed after loading and after every call (`tests/test_orbi_litellm_logging.py`).
+- A deploy causes a few seconds of downtime while the new version starts.
+
+## Security
+
+In place:
+
+- Passwords hashed with PBKDF2-SHA256 and a random salt; JWT (HS256) with a secret kept only in the App Service settings.
+- Access token 30 minutes; refresh token 30 days, rotated on every use and revoked on logout.
+- Role checks: an astronaut cannot read another astronaut's data (403); `/care` and `/app/ground` need `medical` or `admin`; `/ingest` also needs `X-API-Key`.
+- Orbi private mode: nothing stored, nothing sent to a model. Journal mode is shared with the care team, as the app says.
+- The model gets summaries and numbers, never the astronaut's name; risk messages are never sent to it.
+- Uploads get random 128-bit names and type and size checks.
+- Secrets live in the App Service settings and in GitHub secrets, never in the repository.
+
+Before real data:
+
+| To do | Priority |
+|---|---|
+| Turn on **HTTPS Only** in the App Service (HTTP is still accepted) | High |
+| Rotate the Groq key and reset the publish profile after the event | High |
+| Turn off the demo accounts and change `DEMO_PASSWORD` and the PINs | High |
+| Limit `CORS_ORIGINS` to the app's domains | Medium |
+| Rate-limit login attempts | Medium |
+| Require a token to download uploads | Medium |
+| Privacy review of sending health data to an external model provider | Medium |
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q                                   # 181 tests (179 + 2 that need crewai installed)
+TEST_DATABASE_URL=postgresql+psycopg://crew:crew@localhost:5432/crew_test pytest -q   # same suite on an empty PostgreSQL database
+python scripts/check_groq.py                # optional: one real call to the configured model (needs GROQ_API_KEY)
+```
+
+- Covered: routes and access control, score and alerts, offline queue and idempotency, telemetry and confirmations, Orbi rules and safety, AI chat and reflection with a mocked model, provenance, OSDR and AGBRESA parsers, synthetic mission, the LiteLLM logging fix.
+- Tests never call Groq: AI is off or replaced by fixed answers. The real model is checked in production with the `test` account.
+- The suite runs on every pull request (`tests.yml`) and again before every deploy; a failing test blocks the deploy. Use Python 3.12, the same as Azure.
 
 ## Deploy (Azure App Service)
 
@@ -807,15 +944,55 @@ The publish profile is a deploy password for this one app: keep it only in the s
 
 To deploy by hand instead: zip `app` and `requirements.txt`, then `az webapp deploy -g rg-<app> -n <app> --src-path app.zip --type zip`.
 
+Operations:
+
+| Task | How |
+|---|---|
+| Roll back | Revert the pull request on GitHub and merge the revert; Actions deploys the previous code |
+| Logs | `az webapp log download -g rg-crew-health-api-univesp -n crew-health-api-univesp`, or Log stream in the portal |
+| API not answering | `az webapp restart -g rg-crew-health-api-univesp -n crew-health-api-univesp`, then read the logs |
+| Turn the AI off | Set `ORBI_AI_ENABLED=false` in the App Service settings (the app restarts; Orbi uses only rules) |
+| Commit to `main` without deploying (docs only) | Put `[skip ci]` in the commit message |
+
 ## Configuration
 
-See `.env.example`. Main variables: `DATABASE_URL`, `JWT_SECRET`, `SEED_DEMO_USERS`, `DEMO_PASSWORD`, `CURRENT_MISSION_DAY`, `SCHEDULER_ENABLED`, `DETECTION_INTERVAL_MINUTES`, `PROACTIVE_MIN_INTERVAL_DAYS`, `SUPPORT_WEBHOOK_URL`, `INGEST_SOURCE`, `CORS_ORIGINS`, `ADMIN_API_KEY`, `SYNTHETIC_SEED`, `APP_SEED_ON_STARTUP`, `APP_MISSION_DAY`, `APP_DEMO_PIN`, `APP_TEST_PIN`, `APP_GROUND_PIN`, `UPLOAD_DIR`, `UPLOAD_MAX_MB`.
+Environment variables: App Service settings in Azure, a `.env` file locally (copy `.env.example`). Changing a setting in Azure restarts the app.
+
+| Variable | Default | Production | Purpose |
+|---|---|---|---|
+| `DATABASE_URL` | `sqlite:///./data/crew_health.db` | `sqlite:////home/data/crew_health.db` | Database (SQLite or `postgresql+psycopg://…`) |
+| `JWT_SECRET` | placeholder | set | Token signing secret (32+ random characters) |
+| `JWT_EXPIRE_MINUTES` | `30` | default | Access token lifetime |
+| `ADMIN_API_KEY` | empty | set | Required by `POST /api/v1/ingest` when set |
+| `CORS_ORIGINS` | `*` | `*` | Allowed origins, comma-separated |
+| `SEED_DEMO_USERS`, `DEMO_PASSWORD` | `true`, `spaceapps2026` | set | Demo accounts and their password |
+| `INGEST_SOURCE` | `auto` | `bundled` | NASA data from the sites (`remote`), the bundled copies (`bundled`) or both (`auto`) |
+| `INGEST_ON_STARTUP`, `SYNTHETIC_ON_STARTUP`, `APP_SEED_ON_STARTUP` | `true` | default | Load missing data at startup |
+| `OSDR_BASE_URL`, `OSDR_TIMEOUT_SECONDS` | `https://osdr.nasa.gov`, `60` | default | OSDR client |
+| `RAW_CACHE_DIR` | `./data/raw` | `/home/data/raw` | Downloaded files |
+| `WATCH_PCT_CHANGE`, `WATCH_Z_SCORE`, `BASELINE_SD_FLOOR_FRACTION` | `20`, `2.0`, `0.05` | default | OSDR deviation rules |
+| `MISSION_DURATION_DAYS` | `3` | default | Inspiration4 flight length |
+| `SYNTHETIC_SEED` | `42` | default | Synthetic mission generator |
+| `CURRENT_MISSION_DAY` | empty (180) | default | "Today" in the synthetic mission |
+| `SCHEDULER_ENABLED`, `DETECTION_INTERVAL_MINUTES`, `PROACTIVE_MIN_INTERVAL_DAYS` | `true`, `60`, `7` | default | Pattern detection and proactive messages |
+| `SUPPORT_WEBHOOK_URL` | empty | empty | Slack/Teams webhook for new support requests |
+| `KNOWLEDGE_MAX_UPLOAD_MB` | `20` | default | PDF upload limit |
+| `APP_MISSION_DAY` | empty (day 12) | default | CosmoMedic mission day: empty, a number or `auto` |
+| `APP_DEMO_PIN`, `APP_TEST_PIN`, `APP_GROUND_PIN` | `2026`, `0000`, `2026` | default | App PINs |
+| `UPLOAD_DIR`, `UPLOAD_MAX_MB` | `./data/uploads`, `10` | `/home/data/uploads`, default | Files sent by the app |
+| `GROQ_API_KEY` | empty | set | Model key; without it the AI stays off |
+| `AGENT_MODEL` | `groq/llama-3.3-70b-versatile` | `groq/openai/gpt-oss-120b` | Model used by Orbi |
+| `ORBI_AI_ENABLED` | `true` | `true` | AI on (only with a key) |
+| `ORBI_AI_TIMEOUT_SEC` | `30` | default | Limit of each model call |
 
 ## Limitations
 
 - **Pattern rules and messages are illustrative.** Thresholds are generic screening values and the message texts were not reviewed by a clinician or psychologist. They show how the system works; they are not medical criteria.
 - **The scheduler runs inside the API process.** With several workers, each runs it; use one worker or move the cycle to a separate job for production.
-- **AI agent only in `/api/v1/orbi`.** Insights and consultation briefings call a language model (CrewAI with Groq) when `ORBI_AI_ENABLED=true` and `GROQ_API_KEY` is set, and then send selected (simulated) health measurements to that provider; without them the text is statistical (`messageSource: statistical_fallback`). The model's text is not clinically validated. See `app/ORBI_STEP2_README.md`. The rest of the service, including the CosmoMedic chat, is rule-based.
+- **Language model.** The Orbi chat (journal mode), the reflection narrative and the `/api/v1/orbi` insights call a model on Groq when `ORBI_AI_ENABLED=true` and `GROQ_API_KEY` is set, and send it summaries and (simulated) measurements. Its text can be inaccurate and is not clinically validated; safety answers, alerts and consultation decisions never depend on it. It needs a link to Groq; a real mission would need a model on board.
+- **Two astronaut sets.** The CosmoMedic app uses the Orbit-3 crew (`ast-01`–`ast-04`); the insights agent and crew monitoring use the synthetic mission (`A001`–`A004`).
+- **No push notifications.** Orbi writes in the chat and the app sees it within a minute, but nothing reaches a closed app.
+- `POST /api/v1/agent/ask` (questions about the PDF with CrewAI, `app/routers/agent.py`) exists in the code but is not registered in `app/main.py`.
 - **AGBRESA is an analog.** Bed rest reproduces some effects of microgravity (fluid shift, deconditioning) in healthy volunteers on Earth; it is not spaceflight, and these are not the Inspiration4 crew. Do not join it with the other data sets as if it described the same people.
 - **Synthetic mission.** The daily vitals are generated, not measured. Effects follow published orders of magnitude for long ISS stays, but the individual curves, events and thresholds are illustrative. Use the data to build and evaluate the agent and the apps, not to draw physiological conclusions.
 - **Four people, seven timepoints.** The baseline uses three samples per person; z-scores are indicative, not statistical tests.
@@ -828,20 +1005,53 @@ See `.env.example`. Main variables: `DATABASE_URL`, `JWT_SECRET`, `SEED_DEMO_USE
 
 ```
 app/
-  main.py            FastAPI app, CORS, startup ingestion
+  main.py            FastAPI app, CORS, provenance header, startup (ingestion, seeds, AI warm-up, scheduler)
   config.py          settings from environment variables
   db.py, models.py   SQLAlchemy engine and tables
-  schemas.py         response models (camelCase)
-  schemas_missions.py response models for the synthetic mission
+  provenance.py      provenance labels
+  schemas.py         response models (camelCase); schemas_missions.py for the synthetic mission
   osdr/              datasets, OSDR client, CSV parser, analyte catalog
   analog/            AGBRESA files, metric definitions, xlsx parser and decoding
-  auth/              password hashing, JWT, role and per-astronaut access checks
+  auth/              password hashing, JWT, refresh tokens, role and per-astronaut access checks
   knowledge/         bundled PDF (NASA-STD-3001 Vol. 1 Rev. C)
-  cosmo/             CosmoMedic app layer: tables, schemas, rules (score, areas, alerts), Orbi chat rules, meal plan, device telemetry and confirmations, seed
-  synthetic/         metric definitions, generator, check-in catalog and history, assessment; `python -m app.synthetic`
+  cosmo/             CosmoMedic app layer
+    models.py, schemas.py, seed.py, views.py, service.py   tables, schemas, demo data, response builders, writes
+    logic.py         score, body areas, alerts, coins
+    telemetry.py     device readings, confirmations, quick checks
+    offline.py       sync queue, idempotency, changes, offline bundle, link status
+    nutrition.py     meal plan and food catalog
+    orbi.py          Orbi rules: topics, safety, greetings, negation
+    chat_ai.py       Orbi chat with the language model (journal mode)
+    reflection.py    journal + numbers, consultation suggestion, Orbi's consultation message
+    llm.py           shared model helper: switch, timeout, cache, forbidden-answer filter
+  synthetic/         metric definitions, generator, check-ins, assessment; `python -m app.synthetic`
   services/          ingestion, analytics, synthetic store, patterns, proactive messages, support, monitoring cycle, PDF search, users
-  routers/           auth, me, care, crew, dashboard, missions, analog, knowledge, catalog, ingest, provenance, app_public, app_me, app_ground
-  seed/              bundled copies of the five OSDR files, the two AGBRESA files and the CosmoMedic data (cosmomedic/)
+    orbi_service/    insights agent: statistics, CrewAI narrative, guidance, briefing packet and FHIR
+  routers/           auth, me, care, crew, dashboard, missions, analog, knowledge, catalog, ingest, provenance,
+                     app_public, app_me, app_ground, app_sync, app_snapshot, orbi (agent: not registered)
+  seed/              bundled copies of the OSDR and AGBRESA files and the CosmoMedic demo data (cosmomedic/)
 samples/             synthetic_daily_vitals.csv and its ground-truth events
-tests/               parsers, download clients (mocked), API end-to-end, synthetic data, AGBRESA, monitoring, access control, provenance, CosmoMedic app, device telemetry, OSD-575 immune panels
+scripts/check_groq.py  one real call to the configured model
+deploy/azure.sh      creates the App Service and deploys
+tests/               pytest suite (see Tests)
+.github/workflows/   tests.yml (pull requests), deploy.yml (main)
 ```
+
+## Changelog
+
+| PR | Change |
+|---|---|
+| #1 | Synthetic mission routes indexed by metric, daily summary |
+| #2 | Deploy to Azure App Service |
+| #3 | CosmoMedic update: refresh tokens, TEST and GROUND accounts, Orbi chat, uploads, meal plan |
+| #4 | Device telemetry with Orbi confirmations; OSD-575 immune panels |
+| #5, #6 | Offline support; deploy by GitHub Actions, waiting for the new version |
+| #7, #9 | Orbi insights agent (`/api/v1/orbi`) |
+| #8 | Snapshot in the app's format; offline chat with Orbi |
+| #10 | Fix: LiteLLM no longer takes the API down |
+| #11, #12 | Journal reflection with the numbers; consultation suggestion sent in the chat |
+| #13–#16 | Orbi answers with the language model; greetings by station time; language of the latest message; no claimed actions |
+
+## License
+
+MIT, see [LICENSE](LICENSE).
