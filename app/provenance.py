@@ -155,7 +155,7 @@ ROUTES: list[tuple[str, list[str]]] = [
     ("/api/v1/app/telemetry", [DEVICE, SIMULATED]),
     ("/api/v1/app/ground/confirmations", [DEVICE, SIMULATED, USER]),
     ("/api/v1/app/me/orbi/reflection", [USER, SIMULATED, DERIVED, AI]),
-    ("/api/v1/app/me/orbi/", [USER, SIMULATED, DERIVED]),
+    ("/api/v1/app/me/orbi", [USER, SIMULATED, DERIVED, AI]),
     ("/api/v1/app/me/uploads", [USER]),
     ("/api/v1/app/uploads", [USER]),
     ("/api/v1/app/foods", [SIMULATED]),

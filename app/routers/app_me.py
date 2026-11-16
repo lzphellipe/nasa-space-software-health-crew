@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.deps import get_current_user
 from app.config import get_settings
-from app.cosmo import logic, nutrition, offline, orbi, reflection, telemetry, views
+from app.cosmo import chat_ai, logic, nutrition, offline, orbi, reflection, telemetry, views
 from app.cosmo.models import (
     AppAlert,
     AppAstronaut,
@@ -411,7 +411,7 @@ def _chat_out(c: AppChatMessage) -> dict:
     return {"id": c.id, "astronautId": c.astronaut_id, "author": c.author, "text": c.text,
             "timestamp": views.iso(c.timestamp), "mode": c.mode,
             "provenance": "SIMULATED_TELEMETRY" if c.source == "seed"
-            else "USER_REPORTED" if c.author == "astronaut" else "RULE_DERIVED"}
+            else "USER_REPORTED" if c.author == "astronaut" else "AI_GENERATED" if c.source == "ai" else "RULE_DERIVED"}
 
 
 @router.get("/orbi/messages", summary="Chat history with Orbi (journal mode only), oldest first")
@@ -423,34 +423,59 @@ def orbi_messages(limit: int = Query(200, ge=1, le=1000), astronaut: AppAstronau
 
 
 @router.post("/orbi/chat", summary="Talk to Orbi. journal: saved with a journal entry; private: nothing is saved")
-def orbi_chat(body: OrbiChatIn, astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
-    """Answers come from rules (keywords plus the day's summary), labelled RULE_DERIVED.
+def orbi_chat(body: OrbiChatIn, response: Response, idempotency_key: str | None = IDEMPOTENCY_KEY,
+              astronaut: AppAstronaut = Depends(current_astronaut), db: Session = Depends(get_db)):
+    """Journal mode: a language model answers with the astronaut's context when ORBI_AI_ENABLED is on (it
+    thinks before answering, so a reply can take a few seconds); otherwise, and always for self-harm or
+    urgent symptoms, the rules answer. Private mode: rules only, and nothing is written.
 
-    A language model can replace the rules later behind this same route.
+    `Idempotency-Key` (the same id the app uses for its offline `chat.save`) makes a retry safe: the
+    exchange is saved once, whether it arrives here or through `/sync`.
     """
+    if body.mode == "journal" and idempotency_key:
+        out = offline.once(db, astronaut, idempotency_key, "chat.save", None, lambda: (None, _orbi_chat(db, astronaut, body)))
+    else:
+        out = _orbi_chat(db, astronaut, body)
+    response.headers["X-Data-Provenance"] = "USER_REPORTED,RULE_DERIVED" + (",AI_GENERATED" if out.get("aiGenerated") else "")
+    return out
+
+
+def _orbi_chat(db: Session, astronaut: AppAstronaut, body: OrbiChatIn) -> dict:
     m, day = mission_day(db)
     text = body.text.strip()
-    reply, topic = orbi.reply_to(text, astronaut.name.split()[0], evaluate(db, astronaut, day, m))
-    out = {"reply": reply, "mode": body.mode, "topic": topic, "saved": body.mode == "journal",
-           "journalEntry": None, "messages": [], "provenance": "RULE_DERIVED"}
-    if body.mode == "private":
-        return out  # nothing is written, not even the reply
     now = utcnow()
+    first = astronaut.name.split()[0]
+    rules_reply, topic = orbi.reply_to(text, first, evaluate(db, astronaut, day, m), now.hour)
+    out = {"reply": rules_reply, "mode": body.mode, "topic": topic, "saved": body.mode == "journal",
+           "journalEntry": None, "messages": [], "messageSource": "rules", "aiGenerated": False,
+           "provenance": "RULE_DERIVED"}
+    if body.mode == "private":
+        return out  # nothing is written, not even the reply (and nothing goes to a model)
     mine = AppChatMessage(id=new_id("msg"), astronaut_id=astronaut.id, author="astronaut", text=text,
                           timestamp=now, mode="journal", source="app")
-    answer = AppChatMessage(id=new_id("msg"), astronaut_id=astronaut.id, author="orbi", text=reply,
-                            timestamp=now + timedelta(milliseconds=1), mode="journal", source="rules")
+    db.add(mine)
+    db.flush()
+    # "yes" after Orbi suggested a consultation: Orbi asks for it and confirms; that is the reply.
+    answer = reflection.accept_from_chat(db, astronaut, m, day, text, now + timedelta(milliseconds=1))
+    if answer is None:
+        ai_text = chat_ai.reply(db, astronaut, m, day, text)
+        answer = AppChatMessage(id=new_id("msg"), astronaut_id=astronaut.id, author="orbi",
+                                text=ai_text or rules_reply, timestamp=now + timedelta(milliseconds=1), mode="journal",
+                                source="ai" if ai_text else "rules")
+        db.add(answer)
     moods = [l for l in views.astronaut_logs(db, astronaut.id) if l.type == "mood" and l.mission_day == day]
     mood_level = max(moods, key=lambda l: l.timestamp).data["level"] if moods else orbi.MOOD_HINT.get(topic)
     entry = AppJournalEntry(id=new_id("jrn"), astronaut_id=astronaut.id, timestamp=now,
                             summary=orbi.journal_summary(text), mood_level=mood_level,
                             source_message_ids=[mine.id, answer.id])
-    db.add_all([mine, answer, entry])
+    db.add(entry)
     db.commit()
+    ai = answer.source == "ai"
+    out |= {"reply": answer.text, "messageSource": "ai_generated" if ai else "rules", "aiGenerated": ai,
+            "provenance": "AI_GENERATED" if ai else "RULE_DERIVED",
+            "consultationRequested": answer.source == reflection.MESSAGE_SOURCE}
     out["messages"] = [_chat_out(mine), _chat_out(answer)]
-    extra = reflection.accept_from_chat(db, astronaut, m, day, text, now + timedelta(milliseconds=2))
-    db.commit()
-    extra = extra or nudge(db, astronaut, m, day, now + timedelta(milliseconds=2))
+    extra = nudge(db, astronaut, m, day, now + timedelta(milliseconds=2))
     if extra is not None:
         out["messages"].append(_chat_out(extra))
     out["journalEntry"] = {"id": entry.id, "astronautId": entry.astronaut_id, "timestamp": views.iso(entry.timestamp),

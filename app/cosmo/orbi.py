@@ -10,13 +10,17 @@ Modes: "journal" stores both messages and a journal entry; "private" stores noth
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from app.cosmo import logic
 
 # Checked in order; the first topic whose words appear in the message wins.
 TOPICS: list[tuple[str, tuple[str, ...]]] = [
-    ("crisis", ("hurt myself", "kill myself", "end my life", "suicide", "no reason to live", "can't go on", "cant go on")),
-    ("urgent", ("chest pain", "can't breathe", "cant breathe", "short of breath", "fainted", "passed out")),
+    ("crisis", ("hurt myself", "kill myself", "end my life", "suicide", "suicidal", "no reason to live", "can't go on",
+                "cant go on", "don't want to live", "dont want to live", "want to die", "self harm", "end it all",
+                "better off without me", "no point in living", "not worth living")),
+    ("urgent", ("chest pain", "can't breathe", "cant breathe", "cannot breathe", "short of breath", "fainted",
+                "passed out", "severe pain", "bleeding a lot", "heavy bleeding", "can't feel my")),
     ("sleep", ("sleep", "slept", "insomnia", "awake", "woke", "nap", "nightmare")),
     ("tired", ("tired", "exhausted", "fatigue", "drained", "no energy", "worn out")),
     ("stress", ("stress", "anxious", "anxiety", "overwhelmed", "overloaded", "pressure", "worried", "nervous", "panic")),
@@ -29,24 +33,65 @@ TOPICS: list[tuple[str, tuple[str, ...]]] = [
     ("crew", ("crew", "conflict", "argument", "annoyed", "angry", "frustrated")),
     ("good", ("good", "great", "happy", "fine", "better", "excited", "proud", "calm", "rested")),
     ("thanks", ("thanks", "thank you")),
-    ("greeting", ("hello", "hi", "hey", "good morning", "good evening", "good night")),
+    ("greeting", GREETINGS := ("hello", "hi", "hey", "hiya", "good morning", "good afternoon", "good evening",
+                               "good night", "how are you", "how's it going", "whats up", "what's up", "oi", "ola",
+                               "bom dia", "boa tarde", "boa noite", "tudo bem")),
 ]
+# "not good", "don't feel well", "not feeling great"...: a low day, not a good one.
+NEGATED_GOOD = re.compile(r"\b(not|never|no longer|don't|dont|didn't|didnt|isn't|wasn't|ain't)\s+(really\s+|so\s+|very\s+|that\s+|"
+                          r"feeling\s+|feel\s+|doing\s+|been\s+|too\s+)*(good|great|fine|well|ok|okay|happy|better|rested|calm)\b")
+FILLER = {"orbi", "there", "again", "you", "today", "friend", "buddy", "and", "so", "how", "are", "doing"}
 
 NEGATIVE = {"crisis", "urgent", "tired", "stress", "lonely", "sad", "pain", "crew"}
 MOOD_HINT = {"good": 4, "thanks": None, "greeting": None, "sleep": None, "tired": 2, "stress": 1, "lonely": 2,
              "sad": 2, "pain": 2, "crew": 2, "crisis": 1, "urgent": 2}
 
 
+def normalize(text: str) -> str:
+    """Lower case, no accents, straight apostrophes, single spaces, padded (for word matching)."""
+    t = unicodedata.normalize("NFKD", text.replace("\u2019", "'").lower())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return " " + " ".join(re.sub(r"[^a-z' ]+", " ", t).split()) + " "
+
+
+def _has(t: str, words) -> bool:
+    return any(f" {w} " in t for w in words)
+
+
+def is_greeting(text: str) -> bool:
+    """A message that is (almost) only a greeting: "hi", "good morning Orbi", "oi, tudo bem?"."""
+    t = normalize(text)
+    if not _has(t, GREETINGS):
+        return False
+    rest = t
+    for g in sorted(GREETINGS, key=len, reverse=True):
+        rest = rest.replace(f" {g} ", " ")
+    return len([w for w in rest.split() if w not in FILLER]) <= 1
+
+
 def topic_of(text: str) -> str:
-    t = " " + re.sub(r"[^a-z' ]+", " ", text.lower()) + " "
-    for topic, words in TOPICS:
-        if any(f" {w} " in t or (len(w.split()) > 1 and w in t) for w in words):
+    t = normalize(text)
+    for topic, words in TOPICS[:2]:  # danger first, always
+        if _has(t, words):
+            return topic
+    if is_greeting(text):
+        return "greeting"
+    if NEGATED_GOOD.search(t):
+        return "sad"
+    for g in ("good morning", "good afternoon", "good evening", "good night"):
+        t = t.replace(f" {g} ", " ")  # a greeting inside a longer message is not "good"
+    for topic, words in TOPICS[2:]:
+        if _has(t, words):
             return topic
     return "other"
 
 
-def reply_to(text: str, first_name: str, ev: logic.DayEvaluation | None) -> tuple[str, str]:
-    """Return (reply, topic)."""
+def part_of_day(hour: int) -> str:
+    return "Good morning" if 5 <= hour < 12 else "Good afternoon" if 12 <= hour < 18 else "Good evening"
+
+
+def reply_to(text: str, first_name: str, ev: logic.DayEvaluation | None, hour: int | None = None) -> tuple[str, str]:
+    """Return (reply, topic). `hour`: station time (UTC), for greetings."""
     topic = topic_of(text)
     dom = ev.domains if ev else {}
     sleep = dom["sleep"].detail if ev and dom["sleep"].detail else {}
@@ -106,7 +151,14 @@ def reply_to(text: str, first_name: str, ev: logic.DayEvaluation | None) -> tupl
     if topic == "thanks":
         return ("Any time. I'm here whenever you want to talk."), topic
     if topic == "greeting":
-        return (f"Hi, {first_name}. How are you feeling today?"), topic
+        hello = part_of_day(hour) if hour is not None else "Hi"
+        if sleep.get("avgHours") is not None and sleep["avgHours"] < 6:
+            hook = f" Your last nights averaged {sleep['avgHours']:.1f} h of sleep. How are you feeling today?"
+        elif ev and ev.domains.get("mood") and ev.domains["mood"].level in ("warn", "alert"):
+            hook = " The last few days looked heavy in your check-ins. How are you feeling now?"
+        else:
+            hook = " Good to hear from you. How are you feeling today?"
+        return f"{hello}, {first_name}!{hook}", topic
     return ("I'm listening. Tell me a bit more about how you are feeling, or about your day."), topic
 
 
