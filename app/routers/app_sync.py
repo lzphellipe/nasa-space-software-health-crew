@@ -150,7 +150,11 @@ def _run(db: Session, astronaut: AppAstronaut, op: SyncOp, recorded_at: datetime
                                 source_message_ids=[mine.id, answer.id])
         db.add_all([mine, answer, entry])
         db.commit()
-        return entry.id, {"messageIds": [mine.id, answer.id], "journalEntryId": entry.id}
+        m, day = mission_day(db)
+        accepted = reflection.accept_from_chat(db, astronaut, m, day, body.text, at + timedelta(milliseconds=2))
+        db.commit()
+        return entry.id, {"messageIds": [mine.id, answer.id] + ([accepted.id] if accepted else []), "journalEntryId": entry.id,
+                          "consultationRequested": bool(accepted)}
     message_id = _resolve(db, astronaut, op.target_id, "message")
     return message_id, _json(app_me.read_ground(message_id, astronaut, db))
 
@@ -189,6 +193,8 @@ def sync(body: SyncIn, astronaut: AppAstronaut = Depends(current_astronaut), db:
                  "oldestRecordedAt": offline.iso(min(recorded)) if recorded else None,
                  "maxLagSec": max(lags) if lags else None}
     offline.touch(db, astronaut, batch=batch, queued=body.queued_remaining, device_id=body.device_id)
+    if counts["applied"]:
+        app_me.nudge(db, astronaut, m, today)  # Orbi's consultation message, if the new data call for it
     skew = round((now - telemetry._as_utc(body.client_time)).total_seconds()) if body.client_time else None
     return {
         "serverTime": offline.iso(now),
